@@ -1,0 +1,39 @@
+# Build output
+build/
+out/
+bin/
+obj/
+x64/
+x86/
+ARM64/
+Debug/
+Release/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.exp
+*.res
+
+# Visual Studio / CMake
+.vs/
+*.user
+*.suo
+*.vcxproj.user
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pfx
+*.p12
+*.key
+.env
