@@ -1,0 +1,42 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get WebView2 (for Google sign-in)
+        run: nuget install Microsoft.Web.WebView2 -Version 1.0.2903.40 -OutputDirectory packages
+
+      - name: Build
+        run: |
+          cmake -B build -A x64 -DWEBVIEW2_DIR="${{ github.workspace }}/packages/Microsoft.Web.WebView2.1.0.2903.40"
+          cmake --build build --config Release
+
+      - name: Save a picture of every screen
+        timeout-minutes: 5
+        run: |
+          $p = Start-Process -FilePath build\Release\WaveMini.exe -ArgumentList '--render', "$PWD\screens" -PassThru
+          if (-not $p.WaitForExit(240000)) { $p.Kill(); Write-Host "render timed out" }
+          Get-ChildItem screens -ErrorAction SilentlyContinue
+          if (Test-Path screens\render.txt) { Get-Content screens\render.txt }
+          "{0:N0} bytes" -f (Get-Item build\Release\WaveMini.exe).Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WaveMini
+          path: build/Release/WaveMini.exe
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screens
+          path: screens
+          if-no-files-found: ignore
