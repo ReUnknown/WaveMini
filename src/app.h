@@ -13,7 +13,7 @@ enum class Tab { None, UpNext, Lyrics, Search, Library, Account };
 struct LyricLine {
     double at = 0;       // seconds; only meaningful when the lyrics are synced
     string text;
-    float small = 0, big = 0;   // measured heights
+    float plainH = 0, sungH = 0;   // measured heights
 };
 
 struct Settings {

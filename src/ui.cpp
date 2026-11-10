@@ -382,8 +382,8 @@ void drawLyrics() {
     const float width = W_ - 40, gap = 14;
     if (!app.lyricsMeasured) {
         for (auto& line : app.lyrics) {
-            line.small = gfx::textHeight(line.text, width, 15, Semi);
-            line.big = gfx::textHeight(line.text, width, 20, Bold);
+            line.plainH = gfx::textHeight(line.text, width, 15, Semi);
+            line.sungH = gfx::textHeight(line.text, width, 20, Bold);
         }
         app.lyricsMeasured = true;
     }
@@ -393,7 +393,7 @@ void drawLyrics() {
         for (int i = 0; i < (int)app.lyrics.size(); i++) if (app.lyrics[i].at <= at) now = i; else break;
         // Keep the line being sung a third of the way down.
         float offset = 0;
-        for (int i = 0; i < now; i++) offset += app.lyrics[i].small + gap;
+        for (int i = 0; i < now; i++) offset += app.lyrics[i].plainH + gap;
         float want = std::max(0.0f, offset - area.h * 0.3f);
         app.lyricsScroll += (want - app.lyricsScroll) * 0.18f;
         if (fabsf(want - app.lyricsScroll) < 0.5f) app.lyricsScroll = want;
@@ -403,7 +403,7 @@ void drawLyrics() {
     for (int i = 0; i < (int)app.lyrics.size(); i++) {
         const LyricLine& line = app.lyrics[i];
         bool current = i == now;
-        float h = current ? line.big : line.small;
+        float h = current ? line.sungH : line.plainH;
         if (y + h >= area.y && y <= area.bottom()) {
             Rect r{20, y, width, h + 2};
             if (app.lyricsSynced) { double at = line.at; click(r, [at] { seekTo(at); }); }
