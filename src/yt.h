@@ -95,6 +95,11 @@ bool accountInfo(Session& into);
 bool like(const string& videoId, bool liked);
 bool subscribe(const string& channelId, bool on);
 bool addToPlaylist(const string& playlistId, const string& videoId);
+bool removeFromPlaylist(const string& playlistId, const string& videoId, const string& setVideoId);
+// Makes a private playlist; its id, or "".
+string createPlaylist(const string& title);
+// Saves an album or playlist (by its playlist id) to your library, or takes it out.
+bool saveList(const string& playlistId, bool saved);
 
 // A playable audio link for a song. [saver] picks the smallest audio.
 AudioPick audio(const string& videoId, bool saver, bool retryVerified = false, unsigned rejected = 0);

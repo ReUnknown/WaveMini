@@ -58,11 +58,12 @@ static void home(int w, int h, float& x, float& y) {
 static void retime() {
     // Fast while something moves, slow (just the sleep timer and messages) otherwise.
     bool lively = !app.tucked && (app.playing || app.loading || app.searchFocus || (app.settings.tab == Tab::Lyrics && app.playing));
-    UINT want = moving ? 15 : lively ? 33 : 500;
+    UINT want = moving ? 15 : lively ? 33 : (app.tucked || IsIconic(window)) ? 1000 : 500;
     if (want != timerMs) { timerMs = want; SetTimer(window, 1, want, nullptr); }
 }
 
 static void render() {
+    if (IsIconic(window)) { dirty = false; return; }
     Size2 want = wantedSize();
     float wantW = want.w * scale, wantH = want.h * scale;
     if (wantW != goalW || wantH != goalH) {
@@ -130,6 +131,7 @@ static void stepWindow(float dt) {
         posX = targetX; posY = targetY; shownW = goalW; shownH = goalH;
         velX = velY = velW = velH = 0;
         moving = false;
+        if (app.tucked || app.settings.tab == Tab::None) PostMessageW(window, WM_APP + 3, 0, 0);
     }
     dirty = true;
 }
@@ -148,6 +150,19 @@ void windowTuck(bool tuck) {
     app.tucked = tuck;
     app.menuOpen = false;
     invalidate();
+}
+
+void trimMemory() {
+    // Covers not on screen right now, the painted background and the drawing surface (it's
+    // remade at the size needed), then Windows takes back the pages nothing is using.
+    gfx::trimImages(1500);
+    if (bitmap && (bufferW > pixelW * 2 || bufferH > pixelH * 2 || IsIconic(window))) {
+        DeleteObject(bitmap);
+        bitmap = nullptr;
+        bufferW = bufferH = 0;
+    }
+    HeapCompact(GetProcessHeap(), 0);
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 }
 
 void windowClose() { PostMessageW(window, WM_CLOSE, 0, 0); }
@@ -202,10 +217,16 @@ void openSongInBrowser() {
 
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+        case WM_APP + 3: render(); trimMemory(); return 0;
+        case WM_SIZE: if (wparam == SIZE_MINIMIZED) trimMemory(); else if (wparam == SIZE_RESTORED) { invalidate(); render(); } return 0;
+        case WM_RBUTTONUP: uiRightClick(GET_X_LPARAM(lparam) / scale, GET_Y_LPARAM(lparam) / scale); if (dirty) render(); return 0;
         case WM_UICALL: runUiCall(lparam); if (dirty && window) render(); return 0;
         case WM_AUDIO: onAudio((AudioEvent)wparam, lparam); if (dirty) render(); return 0;
         case WM_TIMER: {
             tick();
+            // Out of the way (tucked or minimized): once a minute, hand back whatever built up.
+            static long long lastTrim = 0;
+            if ((app.tucked || IsIconic(hwnd)) && nowMs() - lastTrim > 60000) { lastTrim = nowMs(); trimMemory(); }
             bool lively = !app.tucked && (app.playing || app.loading || app.searchFocus);
             if (dirty || lively) render();
             else retime();
@@ -429,6 +450,21 @@ static int renderCheck(const wstring& dir) {
     app.lyrics[1].at = 0;
     app.lyrics[2].at = 0;
     app.lyricsSynced = true;
+    {
+        // The third line is being sung, part-way through its fifth word.
+        LyricLine& sung = app.lyrics[2];
+        std::vector<string> words = split(sung.text, " ");
+        int from = 0;
+        for (size_t i = 0; i < words.size(); i++) {
+            LyricLine::Word word;
+            word.at = i < 4 ? 0 : i == 4 ? 0.02 : 50;
+            word.end = i < 4 ? 0.01 : i == 4 ? 0.22 : 51;
+            word.from = from;
+            word.count = (int)W(words[i]).size();
+            sung.words.push_back(word);
+            from += word.count + 1;
+        }
+    }
     savePicture(dir, L"02-lyrics");
 
     app.settings.tab = Tab::Search;
@@ -481,8 +517,22 @@ static int renderCheck(const wstring& dir) {
                       fake(Kind::Playlist, "p3", "Sunday kitchen", ""), fake(Kind::Playlist, "p4", "Gym, loud", "")};
     savePicture(dir, L"07-library");
 
+    app.naming = true;
+    app.newName = L"Road trip";
+    savePicture(dir, L"17-new-playlist");
+    app.naming = false;
+    app.newName.clear();
+
     app.settings.tab = Tab::Account;
     savePicture(dir, L"08-account");
+
+    app.settings.tab = Tab::UpNext;
+    app.ctxOpen = true;
+    app.ctxItem = app.queue[2];
+    app.ctxX = 150;
+    app.ctxY = 300;
+    savePicture(dir, L"18-song-menu-anywhere");
+    app.ctxOpen = false;
 
     app.settings.tab = Tab::UpNext;
     app.menuOpen = true;

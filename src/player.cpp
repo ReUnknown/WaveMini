@@ -401,6 +401,82 @@ void removeFromQueue(int index) {
     invalidate();
 }
 
+void playNext(const Item& song) {
+    if (!app.current()) { playRadio(song); return; }
+    app.queue.insert(app.queue.begin() + app.index + 1, song);
+    showToast("Playing next");
+}
+
+void addToQueue(const Item& song) {
+    if (!app.current()) { playRadio(song); return; }
+    app.queue.push_back(song);
+    showToast("Added to the queue");
+}
+
+void moveInQueue(int from, int to) {
+    int count = (int)app.queue.size();
+    if (from <= app.index || from >= count) return;
+    to = std::max(app.index + 1, std::min(count - 1, to));
+    if (to == from) return;
+    Item song = app.queue[from];
+    app.queue.erase(app.queue.begin() + from);
+    app.queue.insert(app.queue.begin() + to, song);
+    invalidate();
+}
+
+bool isSaved(const Item& head) {
+    if (app.savedLists.count(head.id)) return true;
+    const std::vector<Item>& list = app.library[head.kind == Kind::Album ? 1 : 0];
+    return std::any_of(list.begin(), list.end(), [&](const Item& item) { return item.id == head.id; });
+}
+
+void toggleSaved(const Item& head) {
+    if (!app.session.signedIn()) { showToast("Sign in to save to your library"); return; }
+    // Albums are saved by their own playlist; playlists by theirs.
+    string playlistId = head.kind == Kind::Album ? head.playlistId : head.id;
+    if (playlistId.empty()) { showToast("This one can't be saved"); return; }
+    bool save = !isSaved(head);
+    int which = head.kind == Kind::Album ? 1 : 0;
+    if (save) {
+        app.savedLists.insert(head.id);
+        if (app.libraryLoaded[which]) app.library[which].insert(app.library[which].begin(), head);
+    } else {
+        app.savedLists.erase(head.id);
+        auto& list = app.library[which];
+        list.erase(std::remove_if(list.begin(), list.end(), [&](const Item& item) { return item.id == head.id; }), list.end());
+    }
+    showToast(save ? "Saved to your library" : "Removed from your library");
+    background([playlistId, save] { yt::saveList(playlistId, save); });
+}
+
+void createPlaylist(const string& name) {
+    string title = trim(name);
+    if (title.empty()) return;
+    async<string>([title] { return yt::createPlaylist(title); }, [title](string id) {
+        if (id.empty()) { showToast("Couldn't make the playlist"); return; }
+        Item made;
+        made.kind = Kind::Playlist;
+        made.id = id;
+        made.title = title;
+        app.library[0].insert(app.library[0].begin(), made);
+        showToast("Made " + title);
+    });
+}
+
+void removeFromPlaylist(const string& playlistId, const Item& song) {
+    Item copy = song;
+    async<bool>([playlistId, copy] { return yt::removeFromPlaylist(playlistId, copy.id, copy.setVideoId); }, [playlistId, copy](bool ok) {
+        if (!ok) { showToast("Couldn't remove it (is it your playlist?)"); return; }
+        for (auto* stack : {&app.searchPages, &app.libraryPages})
+            for (auto& page : *stack) {
+                if (page.type != Page::List || page.id != playlistId) continue;
+                auto& songs = page.list.songs;
+                songs.erase(std::remove_if(songs.begin(), songs.end(), [&](const Item& s) { return s.setVideoId == copy.setVideoId; }), songs.end());
+            }
+        showToast("Removed from the playlist");
+    });
+}
+
 void toggleShuffle() {
     app.shuffle = !app.shuffle;
     if (app.shuffle && app.index >= 0) shuffleSongs(app.queue, (size_t)app.index + 1);
@@ -506,6 +582,123 @@ static string cleanTitle(string title) {
     return trim(title);
 }
 
+static double ttmlTime(const string& value) {
+    if (value.empty()) return -1;
+    string v = value;
+    if (v.back() == 's') v.pop_back();
+    double total = 0;
+    for (auto& part : split(v, ":")) total = total * 60 + atof(part.c_str());
+    return total;
+}
+
+static string attribute(const string& attrs, const char* name) {
+    string look = string(name) + "=\"";
+    size_t at = attrs.find(look);
+    while (at != string::npos && at > 0 && !isspace((unsigned char)attrs[at - 1])) at = attrs.find(look, at + 1);
+    if (at == string::npos) return string();
+    at += look.size();
+    size_t end = attrs.find('"', at);
+    return end == string::npos ? string() : attrs.substr(at, end - at);
+}
+
+static string unescape(const string& text) {
+    string out;
+    for (size_t i = 0; i < text.size(); i++) {
+        if (text[i] != '&') { out += text[i]; continue; }
+        size_t end = text.find(';', i);
+        string name = end == string::npos || end - i > 8 ? "" : text.substr(i + 1, end - i - 1);
+        if (name == "amp") out += '&';
+        else if (name == "lt") out += '<';
+        else if (name == "gt") out += '>';
+        else if (name == "quot") out += '"';
+        else if (name == "apos" || name == "#39" || name == "#x27") out += '\'';
+        else { out += '&'; continue; }
+        i = end;
+    }
+    return out;
+}
+
+// Apple-style TTML: <p> lines holding timed <span> words (backing vocals are left out).
+static LyricsResult parseTtml(const string& ttml) {
+    LyricsResult out;
+    struct Piece { double at, end; string text; bool space; };
+    std::vector<Piece> pieces;
+    double lineAt = -1, lineEnd = -1, spanAt = -1, spanEnd = -1;
+    bool inLine = false, inWord = false, anyWords = false;
+    int backing = 0;
+    string spanText;
+    auto finishLine = [&] {
+        if (pieces.empty()) return;
+        LyricLine line;
+        line.at = lineAt >= 0 ? lineAt : pieces[0].at;
+        line.end = lineEnd > 0 ? lineEnd : pieces.back().end;
+        for (auto& piece : pieces) {
+            LyricLine::Word word;
+            word.at = piece.at;
+            word.end = piece.end;
+            word.from = (int)W(line.text).size();
+            word.count = (int)W(piece.text).size();
+            line.text += piece.text;
+            if (piece.space) line.text += ' ';
+            if (piece.at >= 0) line.words.push_back(word);
+        }
+        line.text = trim(line.text);
+        if (line.words.size() > 1) anyWords = true;
+        if (!line.text.empty()) out.lines.push_back(line);
+        pieces.clear();
+    };
+    size_t i = 0;
+    while (i < ttml.size()) {
+        if (ttml[i] != '<') {
+            size_t next = ttml.find('<', i);
+            string text = unescape(ttml.substr(i, next == string::npos ? string::npos : next - i));
+            i = next == string::npos ? ttml.size() : next;
+            if (!inLine || backing > 0) continue;
+            if (inWord) spanText += text;
+            else if (trim(text).empty()) { if (!pieces.empty()) pieces.back().space = true; }
+            else pieces.push_back({lineAt, lineEnd, trim(text), !text.empty() && text.back() == ' '});
+            continue;
+        }
+        size_t close = ttml.find('>', i);
+        if (close == string::npos) break;
+        string tag = ttml.substr(i + 1, close - i - 1);
+        i = close + 1;
+        bool closing = !tag.empty() && tag[0] == '/', selfClosing = !tag.empty() && tag.back() == '/';
+        if (closing) tag = tag.substr(1);
+        size_t space = tag.find_first_of(" \t\r\n/");
+        string name = tag.substr(0, space), attrs = space == string::npos ? "" : tag.substr(space);
+        if (!closing) {
+            if (name == "p") {
+                finishLine();
+                inLine = true;
+                lineAt = ttmlTime(attribute(attrs, "begin"));
+                lineEnd = ttmlTime(attribute(attrs, "end"));
+            } else if (name == "span" && inLine && !selfClosing) {
+                if (backing > 0 || attribute(attrs, "ttm:role") == "x-bg") backing++;
+                else {
+                    spanAt = ttmlTime(attribute(attrs, "begin"));
+                    spanEnd = ttmlTime(attribute(attrs, "end"));
+                    spanText.clear();
+                    inWord = spanAt >= 0;
+                }
+            }
+        } else if (name == "span") {
+            if (backing > 0) backing--;
+            else if (inWord) {
+                if (!trim(spanText).empty()) pieces.push_back({spanAt, spanEnd, trim(spanText), !spanText.empty() && spanText.back() == ' '});
+                inWord = false;
+            }
+        } else if (name == "p") {
+            inLine = false;
+            finishLine();
+        }
+    }
+    std::stable_sort(out.lines.begin(), out.lines.end(), [](const LyricLine& a, const LyricLine& b) { return a.at < b.at; });
+    if (!anyWords) for (auto& line : out.lines) line.words.clear();
+    out.synced = !out.lines.empty();
+    return out;
+}
+
 static LyricsResult parseLyrics(const Json& entry) {
     LyricsResult out;
     string synced = entry["syncedLyrics"].str();
@@ -553,6 +746,13 @@ void loadLyrics() {
         string artist = s.artists.empty() ? "" : s.artists[0].name;
         string query = "track_name=" + urlEncode(cleanTitle(s.title)) + "&artist_name=" + urlEncode(artist);
         LyricsResult result;
+        // Word-by-word first (the lyrics Wave uses), then line-by-line, then plain.
+        HttpRes timed = http("GET", "https://lyrics-api.boidu.dev/getLyrics?s=" + urlEncode(cleanTitle(s.title)) + "&a=" + urlEncode(artist) +
+                             (s.durationMs ? "&d=" + std::to_string(s.durationMs / 1000) : "") + (s.album.name.empty() ? "" : "&al=" + urlEncode(s.album.name)), h);
+        if (timed.ok()) {
+            LyricsResult words = parseTtml(Json::parse(timed.body)["ttml"].str());
+            if (!words.lines.empty()) return words;
+        }
         HttpRes exact = http("GET", "https://lrclib.net/api/get?" + query + (s.durationMs ? "&duration=" + std::to_string(s.durationMs / 1000) : ""), h);
         if (exact.ok()) result = parseLyrics(Json::parse(exact.body));
         if (result.lines.empty()) {

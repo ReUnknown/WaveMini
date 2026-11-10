@@ -14,6 +14,10 @@ struct LyricLine {
     double at = 0;       // seconds; only meaningful when the lyrics are synced
     string text;
     float plainH = 0, sungH = 0;   // measured heights
+    double end = 0;      // when the line is over (0 = not known)
+    struct Word { double at, end; int from, count; };   // letters [from, from + count) of the text, in UTF-16
+    std::vector<Word> words;
+    float h = 0;         // measured height
 };
 
 struct Settings {
@@ -59,6 +63,8 @@ struct App {
     std::vector<LyricLine> lyrics;
     bool lyricsSynced = false, lyricsLoading = false, lyricsMeasured = false;
     float lyricsScroll = 0;
+    float lyricsNudge = 0;         // scrolled by hand, for a moment
+    long long lyricsNudgeUntil = 0;
 
     // Search.
     wstring query;
@@ -91,6 +97,18 @@ struct App {
     std::vector<Page> libraryPages;
 
     float queueScroll = 0;
+
+    // The menu on any song (right-click, or its three dots).
+    bool ctxOpen = false;
+    int ctxPage = 0;               // 0 the menu, 1 "add to playlist"
+    float ctxX = 0, ctxY = 0, ctxScroll = 0;
+    Item ctxItem;
+    string ctxPlaylist;            // the playlist the song was shown in (to remove it from there)
+
+    // Making a playlist.
+    bool naming = false;
+    wstring newName;
+    std::set<string> savedLists;   // albums and playlists saved this session (by page id)
 
     // The song menu.
     bool menuOpen = false;
@@ -128,6 +146,13 @@ void nextSong(bool byUser);
 void previousSong();
 void seekTo(double seconds);
 void removeFromQueue(int index);
+void playNext(const Item& song);
+void addToQueue(const Item& song);
+void moveInQueue(int from, int to);
+void toggleSaved(const Item& head);                     // an album or playlist, in or out of your library
+bool isSaved(const Item& head);
+void createPlaylist(const string& name);
+void removeFromPlaylist(const string& playlistId, const Item& song);
 void toggleShuffle();
 void cycleRepeat();
 void toggleLike();
@@ -160,6 +185,7 @@ void uiMouseDown(float x, float y);
 void uiMouseMove(float x, float y);
 void uiMouseUp(float x, float y);
 void uiMouseLeave();
+void uiRightClick(float x, float y);
 void uiWheel(float x, float y, float delta);
 bool uiChar(wchar_t c);
 bool uiKey(WPARAM key, bool ctrl);
@@ -175,3 +201,5 @@ void startSignIn();
 void verifyPlayback();
 void openSongInBrowser();
 void applyOnTop();
+// Gives back what isn't needed right now (pictures, the big drawing surface) to Windows.
+void trimMemory();

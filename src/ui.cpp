@@ -15,6 +15,7 @@ struct Hit {
     Rect r;
     std::function<void()> click;
     std::function<void(float, float, bool)> drag;   // x, y, released
+    std::function<void(float, float)> context;      // right-click, at x, y
 };
 struct ScrollArea { Rect r; float* value; float max; };
 
@@ -23,7 +24,8 @@ std::vector<ScrollArea> scrolls;
 float mouseX = -1, mouseY = -1, downX = -1, downY = -1;
 bool mouseIn = false, inputOn = true, clipOn = false;
 Rect clipRect;
-std::function<void(float, float, bool)> dragging;
+std::function<void(float, float, bool)> dragging, pendingDrag;
+bool lastPushed = false;             // the last click() really added something to hit
 double seekPreview = -1;
 
 Rect visible(Rect r) {
@@ -75,15 +77,17 @@ float arrive(Arrival& a, const string& key, float seconds = 0.24f) {
 
 
 bool click(Rect r, std::function<void()> fn) {
+    lastPushed = false;
     if (!inputOn || !live) return false;
     Rect v = visible(r);
     if (v.w <= 0 || v.h <= 0) return false;
-    hits.push_back({v, std::move(fn), nullptr});
+    hits.push_back({v, std::move(fn), nullptr, nullptr});
+    lastPushed = true;
     return hover(r);
 }
 
 void dragArea(Rect r, std::function<void(float, float, bool)> fn) {
-    if (inputOn && live) hits.push_back({visible(r), nullptr, std::move(fn)});
+    if (inputOn && live) hits.push_back({visible(r), nullptr, std::move(fn), nullptr});
 }
 
 // Starts a scrolling list; returns the y its content starts at.
@@ -157,15 +161,40 @@ void cover(const string& art, Rect r, float radius, int px) {
     if (!art.empty()) gfx::image(artAt(art, px), r, radius);
 }
 
-// A row: cover, title and a grey line, and an optional bit of text on the right.
-void itemRow(Rect r, const Item& item, const string& sub, const string& right, bool current, std::function<void()> fn) {
+// Opens the menu for a song at a point ([playlist]: the playlist it's listed in, if any).
+std::function<void(float, float)> songMenu(const Item& item, const string& playlist = "") {
+    if (item.kind != Kind::Song) return nullptr;
+    Item copy = item;
+    return [copy, playlist](float x, float y) {
+        app.ctxOpen = true;
+        app.ctxPage = 0;
+        app.ctxItem = copy;
+        app.ctxPlaylist = playlist;
+        app.ctxX = x;
+        app.ctxY = y;
+        app.ctxScroll = 0;
+    };
+}
+
+// The thing just made clickable also opens [menu] on a right-click.
+void withMenu(const std::function<void(float, float)>& menu) {
+    if (lastPushed && menu && !hits.empty()) hits.back().context = menu;
+}
+
+// A row: cover, title and a grey line, and an optional bit of text on the right. With a
+// [menu], right-clicking opens it, and so do the three dots that show under the pointer.
+// Returns where the row is in the list of clickable things (-1 when it isn't).
+int itemRow(Rect r, const Item& item, const string& sub, const string& right, bool current, std::function<void()> fn, std::function<void(float, float)> menu = nullptr) {
     bool over = click(r, std::move(fn));
+    int index = lastPushed ? (int)hits.size() - 1 : -1;
+    withMenu(menu);
     if (current) gfx::fill(r, theme.accent.alpha(0.16f), 10);
     else if (over) gfx::fill(r, white(0.07f), 10);
     float art = std::min(40.0f, r.h - 10);
     Rect coverRect{r.x + 6, r.y + (r.h - art) / 2, art, art};
     cover(item.art, coverRect, item.kind == Kind::Artist ? art / 2 : 6, 120);
-    float rightW = right.empty() ? 0 : gfx::textWidth(right, 12, Regular) + 10;
+    bool dots = over && menu != nullptr;
+    float rightW = dots ? 30 : right.empty() ? 0 : gfx::textWidth(right, 12, Regular) + 10;
     float tx = coverRect.right() + 12, tw = r.right() - tx - rightW - 8;
     Color titleColor = current ? theme.soft : white();
     if (sub.empty()) gfx::text(item.title, Rect{tx, r.y, tw, r.h}, 14, Bold, titleColor);
@@ -173,7 +202,11 @@ void itemRow(Rect r, const Item& item, const string& sub, const string& right, b
         gfx::text(item.title, Rect{tx, r.y + r.h / 2 - 19, tw, 20}, 14, Bold, titleColor);
         gfx::text(sub, Rect{tx, r.y + r.h / 2 + 1, tw, 18}, 12.5f, Regular, white(0.7f));
     }
-    if (!right.empty()) gfx::text(right, Rect{r.right() - rightW - 6, r.y, rightW, r.h}, 12, Regular, white(0.65f), AlignRight);
+    if (dots) {
+        Rect more{r.right() - 34, r.y + (r.h - 28) / 2, 28, 28};
+        iconButton(more, Icon::More, 14, white(0.1f), white(0.9f), 8, [menu, more] { menu(more.x - 190, more.bottom() + 2); });
+    } else if (!right.empty()) gfx::text(right, Rect{r.right() - rightW - 6, r.y, rightW, r.h}, 12, Regular, white(0.65f), AlignRight);
+    return index;
 }
 
 void centered(const string& title, const string& sub, float top, float height) {
@@ -412,6 +445,9 @@ void drawTabs() {
 
 // ---------------------------------------------------------------- Up next
 
+int dragRow = -1;                    // the queue entry being dragged to a new place
+float dragRowY = 0, dragGrab = 0;
+
 void drawUpNext() {
     gfx::text("Playing from", Rect{16, TOP, 90, 40}, 13, Regular, white(0.7f));
     float fromW = gfx::textWidth("Playing from ", 13, Regular);
@@ -421,20 +457,55 @@ void drawUpNext() {
     iconButton(Rect{W_ - 16 - 34, TOP + 3, 34, 34}, app.repeat == 2 ? Icon::RepeatOne : Icon::Repeat, 18, repeat ? theme.accent.alpha(0.18f) : white(0), repeat ? theme.accent : white(0.8f), 10, [] { cycleRepeat(); });
 
     Rect area{0, TOP + 40, W_, PANEL - 48};
-    int first = app.index + 1;
-    if (first >= (int)app.queue.size()) {
+    int first = app.index + 1, count = (int)app.queue.size();
+    if (first >= count) {
+        dragRow = -1;
         centered(app.current() ? (app.fetchingMore ? "Finding more songs..." : "Nothing up next") : "Nothing playing",
                  app.current() ? "Songs you queue up show here." : "Pick something in Search or your Library.", area.y, area.h);
         return;
     }
-    float y = beginScroll(area, app.queueScroll);
-    for (int i = first; i < (int)app.queue.size(); i++, y += 56) {
-        if (y + 56 < area.y || y > area.bottom()) continue;
+    if (dragRow >= count || dragRow < first) dragRow = -1;
+    float top = beginScroll(area, app.queueScroll);
+    auto slotAt = [first, count](float rowY, float listTop) {
+        return std::max(first, std::min(count - 1, first + (int)floorf((rowY + 28 - listTop) / 56)));
+    };
+    int slot = dragRow < 0 ? -1 : slotAt(dragRowY, top);
+    float y = top;
+    for (int i = first; i < count; i++, y += 56) {
+        float rowY = y;
+        if (dragRow >= 0) {
+            // The others step aside for the one being dragged.
+            float aside = (dragRow < i && i <= slot) ? -56.0f : (slot <= i && i < dragRow) ? 56.0f : 0.0f;
+            rowY += glide(4000 + i, aside, 620, 1);
+        }
+        if (i == dragRow || rowY + 56 < area.y || rowY > area.bottom()) continue;
         const Item& song = app.queue[i];
-        itemRow(Rect{10, y + 2, W_ - 20 - 36, 52}, song, song.artistText(), song.durationMs ? formatTime(song.durationMs / 1000.0) : "", false, [i] { playIndex(i); });
-        iconButton(Rect{W_ - 10 - 34, y + 12, 32, 32}, Icon::Close, 16, white(0), white(0.7f), 8, [i] { removeFromQueue(i); });
+        int hit = itemRow(Rect{10, rowY + 2, W_ - 20 - 36, 52}, song, song.artistText(), song.durationMs ? formatTime(song.durationMs / 1000.0) : "", false,
+                          [i] { playIndex(i); }, songMenu(song));
+        if (hit >= 0 && dragRow < 0) hits[hit].drag = [i, rowY, top, slotAt](float, float py, bool released) {
+            if (dragRow < 0) { dragRow = i; dragGrab = py - rowY; }
+            dragRowY = py - dragGrab;
+            if (released) {
+                int to = slotAt(dragRowY, top);
+                int from = dragRow;
+                dragRow = -1;
+                for (int k = 4000; k < 4000 + (int)app.queue.size() + 1; k++) springs.erase(k);
+                moveInQueue(from, to);
+            }
+        };
+        iconButton(Rect{W_ - 10 - 34, rowY + 12, 32, 32}, Icon::Close, 16, white(0), white(0.7f), 8, [i] { removeFromQueue(i); });
     }
-    endScroll(area, app.queueScroll, y);
+    if (dragRow >= 0) {
+        const Item& song = app.queue[dragRow];
+        bool was = live;
+        live = false;
+        Rect r{10, dragRowY + 2, W_ - 20, 52};
+        gfx::fill(r, mix(theme.bg, theme.accent, 0.22f), 10);
+        itemRow(r, song, song.artistText(), "", false, [] {});
+        live = was;
+        animating = true;
+    }
+    endScroll(area, app.queueScroll, top + (count - first) * 56.0f);
 }
 
 // ---------------------------------------------------------------- Lyrics
@@ -445,46 +516,90 @@ void drawLyrics() {
     if (app.lyricsFor != app.current()->id) loadLyrics();
     if (app.lyricsLoading) { centered("Finding lyrics...", "", area.y, area.h); return; }
     if (app.lyrics.empty()) { centered("No lyrics for this song", "", area.y, area.h); return; }
-    const float width = W_ - 40, gap = 14;
+    const float left = 22, width = W_ - 44, size = 21, gap = 18;
+    int count = (int)app.lyrics.size();
     if (!app.lyricsMeasured) {
         for (auto& line : app.lyrics) {
-            line.plainH = gfx::textHeight(line.text, width, 15, Semi);
-            line.sungH = gfx::textHeight(line.text, width, 20, Bold);
+            line.h = gfx::textHeight(line.text, width, size, Bold);
+            line.plainH = gfx::textHeight(line.text, width, 16, Semi);
         }
+        for (int k = 6000; k < 8000; k++) springs.erase(k);
         app.lyricsMeasured = true;
     }
-    int now = -1;
-    if (app.lyricsSynced) {
-        double at = audio::position() + 0.25;
-        for (int i = 0; i < (int)app.lyrics.size(); i++) if (app.lyrics[i].at <= at) now = i; else break;
-        // Keep the line being sung a third of the way down.
-        float offset = 0;
-        for (int i = 0; i < now; i++) offset += app.lyrics[i].plainH + gap;
-        float want = std::max(0.0f, offset - area.h * 0.3f);
-        app.lyricsScroll += (want - app.lyricsScroll) * 0.18f;
-        if (fabsf(want - app.lyricsScroll) < 0.5f) app.lyricsScroll = want;
-    }
-    gfx::pushFade(area, 28, 60);
-    float y = beginScroll(area, app.lyricsScroll) + 20;
-    for (int i = 0; i < (int)app.lyrics.size(); i++) {
-        const LyricLine& line = app.lyrics[i];
-        bool current = i == now;
-        float h = current ? line.sungH : line.plainH;
-        if (y + h >= area.y && y <= area.bottom()) {
-            Rect r{20, y, width, h + 2};
-            if (app.lyricsSynced) { double at = line.at; click(r, [at] { seekTo(at); }); }
-            gfx::text(line.text, r, current ? 20 : 15, current ? Bold : Semi, current ? white() : white(app.lyricsSynced ? 0.5f : 0.82f), AlignLeft, true, true);
+
+    if (!app.lyricsSynced) {
+        // No timing for this song: lyrics to read and scroll.
+        gfx::pushFade(area, 24, 50);
+        float y = beginScroll(area, app.lyricsScroll) + 16;
+        for (auto& line : app.lyrics) {
+            if (y + line.plainH >= area.y && y <= area.bottom())
+                gfx::text(line.text, Rect{left, y, width, line.plainH + 2}, 16, Semi, white(0.86f), AlignLeft, true, true);
+            y += line.plainH + 12;
         }
-        y += h + gap;
+        endScroll(area, app.lyricsScroll, y + 50);
+        gfx::popFade();
+        return;
     }
-    float end = y + 70;
-    if (app.lyricsSynced) {
-        // The list follows the song; the wheel doesn't fight it.
-        clipOn = false;
-        gfx::popClip();
-        if (inputOn && live && !scrolls.empty()) scrolls.pop_back();
-    } else endScroll(area, app.lyricsScroll, end);
+
+    double at = audio::position() + 0.12;
+    int now = -1;
+    for (int i = 0; i < count; i++) { if (app.lyrics[i].at <= at) now = i; else break; }
+    // Between lines (a long break in the singing) nothing is lit.
+    bool resting = now >= 0 && app.lyrics[now].end > 0 && at > app.lyrics[now].end + 0.5 && now + 1 < count && app.lyrics[now + 1].at - at > 2;
+    bool intro = now < 0 && app.lyrics[0].at > 3;
+    float offset = intro ? -40.0f : 0;
+    for (int i = 0; i < now; i++) offset += app.lyrics[i].h + gap;
+    if (nowMs() > app.lyricsNudgeUntil) app.lyricsNudge = 0;
+    float target = offset - area.h * 0.26f + app.lyricsNudge;
+
+    gfx::pushFade(area, 40, 80);
+    gfx::pushClip(area);
+    clipOn = true;
+    clipRect = area;
+    if (intro || resting) {
+        // Three dots breathing while the music plays on its own.
+        float dotsY = area.y + (intro ? -24.0f : offset + app.lyrics[now].h + 2) - glide(5999, target, 240, 1);
+        if (intro) for (int i = 0; i < 3; i++) {
+            float wave = 0.5f + 0.5f * sinf((float)(nowMs() % 2400) / 2400.0f * 6.2831853f - i * 0.9f);
+            gfx::circle(left + 7 + i * 20, dotsY, 4.5f + wave * 1.5f, white(0.35f + 0.5f * wave));
+        }
+    }
+    float contentY = 0;
+    for (int i = 0; i < count; i++) {
+        LyricLine& line = app.lyrics[i];
+        int ahead = std::max(0, std::min(8, i - std::max(now, 0)));
+        // Each line follows the scroll a touch later than the one above it.
+        float follow = glide(6000 + i, target, 70 + 230.0f / (1 + 0.3f * ahead), 1);
+        bool current = i == now && !resting;
+        float lit = glide(7000 + i, current ? 1.0f : 0.0f, 260, 1);
+        float y = area.y + contentY - follow;
+        contentY += line.h + gap;
+        if (y + line.h < area.y - 20 || y > area.bottom() + 20) continue;
+        Rect r{left, y, width, line.h + 4};
+        double seekAt = line.at;
+        click(r, [seekAt] { app.lyricsNudgeUntil = 0; seekTo(seekAt); });
+        int away = std::min(4, abs(i - std::max(now, 0)));
+        float dim = 0.36f - 0.045f * away;
+        float scale = 0.95f + 0.05f * lit;
+        gfx::pushTransform(scale, left * (1 - scale), (y + line.h / 2) * (1 - scale));
+        if (current && !line.words.empty()) {
+            int sung = 0, wordChars = 0;
+            float part = 0;
+            for (auto& word : line.words) {
+                if (word.at > at) break;
+                sung = word.from;
+                wordChars = word.count;
+                part = (float)std::max(0.0, std::min(1.0, (at - word.at) / std::max(0.06, word.end - word.at)));
+            }
+            gfx::textSung(line.text, r, size, Bold, white(0.38f + 0.1f * lit), white(), sung, wordChars, part);
+        } else gfx::text(line.text, r, size, Bold, white(dim + (1 - dim) * lit), AlignLeft, true, true);
+        gfx::popTransform();
+    }
+    clipOn = false;
+    gfx::popClip();
     gfx::popFade();
+    // Lyrics move with the music: a frame per screen refresh while they're showing.
+    if (app.playing) animating = true;
 }
 
 // ---------------------------------------------------------------- Pages (artist, album, playlist, lists)
@@ -520,7 +635,11 @@ void drawListPage(std::vector<Page>& stack, Page& page) {
     Page* p = &page;
     float x = 148;
     x += pill(x, y + 44, 34, "Play", (int)Icon::Play, true, 13, 14, 10, [p] { playFromPage(*p, 0, false); }) + 6;
-    pill(x, y + 44, 34, "Shuffle", (int)Icon::Shuffle, false, 13, 14, 10, [p] { playFromPage(*p, 0, true); });
+    x += pill(x, y + 44, 34, "Shuffle", (int)Icon::Shuffle, false, 13, 14, 10, [p] { playFromPage(*p, 0, true); }) + 6;
+    if (!page.loading && page.list.ok && page.id != "LM" && app.session.signedIn() && x + 34 <= W_ - 10) {
+        bool saved = isSaved(head);
+        iconButton(Rect{x, y + 44, 34, 34}, saved ? Icon::HeartFull : Icon::Heart, 16, white(0.1f), saved ? theme.accent : white(), 10, [p] { toggleSaved(p->list.head); });
+    }
     y += 90;
     const Item* playing = app.current();
     for (int i = 0; i < (int)page.list.songs.size(); i++) {
@@ -532,12 +651,14 @@ void drawListPage(std::vector<Page>& stack, Page& page) {
             if (album) {
                 Rect r{10, y, W_ - 20, 42};
                 bool over = click(r, [p, i] { playFromPage(*p, i, false); });
+                withMenu(songMenu(song));
                 if (current) gfx::fill(r, theme.accent.alpha(0.16f), 10);
                 else if (over) gfx::fill(r, white(0.07f), 10);
                 gfx::text(std::to_string(i + 1), Rect{16, y, 26, 42}, 13, Regular, white(0.65f), AlignCenter);
                 gfx::text(song.title, Rect{52, y, W_ - 52 - 70, 42}, 14, Semi, current ? theme.soft : white());
                 gfx::text(time, Rect{W_ - 20 - 50, y, 50, 42}, 12, Regular, white(0.65f), AlignRight);
-            } else itemRow(Rect{10, y + 1, W_ - 20, 50}, song, song.artistText(), time, current, [p, i] { playFromPage(*p, i, false); });
+            } else itemRow(Rect{10, y + 1, W_ - 20, 50}, song, song.artistText(), time, current, [p, i] { playFromPage(*p, i, false); },
+                           songMenu(song, song.setVideoId.empty() ? "" : page.id));
         }
         y += h;
     }
@@ -621,7 +742,7 @@ void drawArtistPage(std::vector<Page>& stack, Page& page) {
                     app.last = sec.items[i];
                     app.hasLast = true;
                     playSongs(list, i, p->artist.artist.title);
-                });
+                }, songMenu(song));
             }
         } else {
             float x = 16;
@@ -661,7 +782,7 @@ void drawItemsPage(std::vector<Page>& stack, Page& page) {
             app.current() && app.current()->id == item.id, [where, p, i] {
                 Item copy = p->items[i];
                 openItem(*where, copy);
-            });
+            }, songMenu(item));
     }
     endScroll(area, page.scroll, y);
 }
@@ -722,6 +843,7 @@ void homeRow(int s, float& y, Rect area) {
                 playSongs(app.home[s].items, i, app.home[s].title);
             } else openItem(app.searchPages, copy);
         });
+        withMenu(songMenu(item));
         float radius = item.kind == Kind::Artist ? tile / 2 : 10;
         cover(item.art, Rect{x, y, tile, tile}, radius, 240);
         if (over) gfx::fill(Rect{x, y, tile, tile}, white(0.12f), radius);
@@ -787,7 +909,7 @@ void drawSuggestions(Rect area) {
             if (i >= (int)app.suggestItems.size()) return;
             Item copy = app.suggestItems[i];
             openItem(app.searchPages, copy);
-        });
+        }, songMenu(item));
         y += 52;
         shown++;
     }
@@ -865,7 +987,7 @@ void drawSearch() {
                             gfx::text(item.title, Rect{76, y + 11, W_ - 76 - 50, 22}, 15, Bold, white());
                             gfx::text(item.subtitle(true), Rect{76, y + 33, W_ - 76 - 50, 18}, 12.5f, Regular, white(0.7f));
                             gfx::icon(Icon::Chevron, Rect{W_ - 10 - 30, y + 23, 18, 18}, white(0.7f));
-                        } else itemRow(Rect{10, y + 1, W_ - 20, 50}, item, item.subtitle(true), "", app.current() && app.current()->id == item.id, open);
+                        } else itemRow(Rect{10, y + 1, W_ - 20, 50}, item, item.subtitle(true), "", app.current() && app.current()->id == item.id, open, songMenu(item));
                     }
                     y += h;
                 }
@@ -901,10 +1023,31 @@ void drawLibrary() {
         gfx::text(tiles[i].title, Rect{r.x + 58, r.y + 11, 130, 20}, 14, Bold, white());
         gfx::text(tiles[i].sub, Rect{r.x + 58, r.y + 31, 130, 18}, 12, Regular, white(0.7f));
     }
-    const char* names[3] = {"Playlists", "Albums", "Artists"};
-    float x = 10;
-    for (int i = 0; i < 3; i++)
-        x += chip(x, TOP + 68, names[i], app.libraryTab == i, [i] { app.libraryTab = i; app.libraryScroll = 0; loadLibrary(i); }) + 6;
+    if (app.naming) {
+        // A name for the new playlist, typed right here.
+        Rect field{10, TOP + 66, W_ - 20 - 122, 34};
+        gfx::fill(field, white(0.1f), 10);
+        gfx::outline(field, theme.accent, 10, 2);
+        string name = U(app.newName);
+        if (name.empty()) gfx::text("Playlist name", Rect{22, field.y, field.w - 20, 34}, 14, Regular, white(0.6f));
+        else gfx::text(name, Rect{22, field.y, field.w - 20, 34}, 14, Semi, white());
+        if ((nowMs() / 530) % 2 == 0) gfx::fill(Rect{22 + std::min(field.w - 24, gfx::textWidth(name, 14, Semi)) + 1, field.y + 8, 1.5f, 18}, white());
+        float cw = pill(field.right() + 6, TOP + 66, 34, "Create", -1, true, 13, 14, 10, [] {
+            createPlaylist(U(app.newName));
+            app.naming = false;
+            app.newName.clear();
+        });
+        iconButton(Rect{field.right() + 12 + cw, TOP + 66, 34, 34}, Icon::Close, 14, white(0.1f), white(), 10, [] { app.naming = false; app.newName.clear(); });
+    } else {
+        const char* names[3] = {"Playlists", "Albums", "Artists"};
+        float x = 10;
+        for (int i = 0; i < 3; i++)
+            x += chip(x, TOP + 68, names[i], app.libraryTab == i, [i] { app.libraryTab = i; app.libraryScroll = 0; loadLibrary(i); }) + 6;
+        if (app.libraryTab == 0) {
+            float w = gfx::textWidth("New", 13, Bold) + 28 + 20;
+            pill(W_ - 10 - w, TOP + 66, 34, "New", (int)Icon::AddList, false, 13, 12, 10, [] { app.naming = true; app.newName.clear(); });
+        }
+    }
 
     int which = app.libraryTab;
     Rect area{0, TOP + 106, W_, PANEL - 114};
@@ -1074,6 +1217,62 @@ void drawMenu(float w, float h) {
     });
 }
 
+// ---------------------------------------------------------------- The menu on any song
+
+void drawContext(float w, float h) {
+    click(Rect{0, 0, w, h}, [] { app.ctxOpen = false; });
+    gfx::fill(Rect{0, 0, w, h}, Color{0, 0, 0, 0.32f});
+    Item song = app.ctxItem;
+    bool account = app.session.signedIn();
+    bool removable = account && !app.ctxPlaylist.empty() && !song.setVideoId.empty();
+    const float mw = 232;
+    int rows = 3 + (account ? 1 : 0) + (song.artists.empty() ? 0 : 1) + (song.album.id.empty() ? 0 : 1) + (removable ? 1 : 0);
+    float height = app.ctxPage == 1 ? std::min(h - 16, 300.0f) : 12 + 40.0f * rows;
+    float x = std::max(8.0f, std::min(app.ctxX, w - mw - 8)), top = std::max(8.0f, std::min(app.ctxY, h - height - 8));
+    Rect card{x, top, mw, height};
+    click(card, [] {});
+    gfx::fill(card, mix(theme.bg, theme.accent, 0.13f), 14);
+    gfx::outline(card, white(0.09f), 14, 1);
+    float y = top + 6;
+    if (app.ctxPage == 1) {
+        menuRow(x, y, mw, Icon::Back, "Add to playlist", "", false, [] { app.ctxPage = 0; });
+        Rect area{x, y, mw, card.bottom() - y - 6};
+        if (!app.libraryLoaded[0]) { loadLibrary(0); gfx::text("Loading...", area, 13, Semi, white(0.7f), AlignCenter); return; }
+        if (app.library[0].empty()) { gfx::text("No playlists yet", area, 13, Semi, white(0.7f), AlignCenter); return; }
+        float ry = beginScroll(area, app.ctxScroll);
+        for (int i = 0; i < (int)app.library[0].size(); i++, ry += 44) {
+            if (ry + 44 < area.y || ry > area.bottom()) continue;
+            const Item& list = app.library[0][i];
+            string id = list.id, title = list.title, videoId = song.id;
+            itemRow(Rect{x + 6, ry, mw - 12, 42}, list, "", "", false, [id, title, videoId] {
+                app.ctxOpen = false;
+                async<bool>([id, videoId] { return yt::addToPlaylist(id, videoId); }, [title](bool ok) { showToast(ok ? "Added to " + title : "Couldn't add it"); });
+            });
+        }
+        endScroll(area, app.ctxScroll, ry);
+        return;
+    }
+    menuRow(x, y, mw, Icon::Play, "Play next", "", false, [song] { app.ctxOpen = false; playNext(song); });
+    menuRow(x, y, mw, Icon::Queue, "Add to queue", "", false, [song] { app.ctxOpen = false; addToQueue(song); });
+    menuRow(x, y, mw, Icon::Radio, "Start radio", "", false, [song] { app.ctxOpen = false; playRadio(song); });
+    if (account) menuRow(x, y, mw, Icon::AddList, "Add to playlist", "", true, [] { app.ctxPage = 1; app.ctxScroll = 0; loadLibrary(0); });
+    if (!song.artists.empty()) menuRow(x, y, mw, Icon::Person, "View artist", "", false, [song] {
+        app.ctxOpen = false;
+        app.settings.tab = Tab::Search;
+        if (!song.artists[0].id.empty()) openPage(app.searchPages, Page::Artist, song.artists[0].id, song.artists[0].name);
+        else { app.query = W(song.artists[0].name); app.searchPages.clear(); runSearch(); }
+    });
+    if (!song.album.id.empty()) menuRow(x, y, mw, Icon::Disc, "View album", "", false, [song] {
+        app.ctxOpen = false;
+        app.settings.tab = Tab::Search;
+        openPage(app.searchPages, Page::List, song.album.id, song.album.name);
+    });
+    if (removable) {
+        string playlist = app.ctxPlaylist;
+        menuRow(x, y, mw, Icon::Close, "Remove from playlist", "", false, [song, playlist] { app.ctxOpen = false; removeFromPlaylist(playlist, song); });
+    }
+}
+
 // ---------------------------------------------------------------- Sign-in
 
 void waveLines(float top) {
@@ -1175,7 +1374,7 @@ static void drawCard(float w, float h, float shownH, bool usable) {
     if (!app.hasSession) { live = usable; drawSignIn(w, h); return; }
     backdrop(w, PLAYER + TABS + PANEL);
     // Under an open menu nothing takes clicks.
-    inputOn = !app.menuOpen;
+    inputOn = !app.menuOpen && !app.ctxOpen;
     live = usable;
     drawPlayer();
     drawTabs();
@@ -1209,6 +1408,17 @@ static void drawCard(float w, float h, float shownH, bool usable) {
         live = usable;
         // The menu's own button stays live on top of the scrim.
         if (app.menuOpen) windowButtons(true, Color{0, 0, 0, 0.22f});
+    }
+    float context = glide(52, app.ctxOpen ? 1.0f : 0.0f, 520, 1);
+    if (context > 0.01f) {
+        inputOn = true;
+        live = usable && app.ctxOpen;
+        gfx::pushOpacity(Rect{0, 0, w, h}, std::min(1.0f, context));
+        gfx::pushTransform(1, 0, (1 - context) * -8);
+        drawContext(w, h);
+        gfx::popTransform();
+        gfx::popOpacity();
+        live = usable;
     }
     inputOn = true;
     float toast = glide(51, app.toast.empty() ? 0.0f : 1.0f, 520, 1);
@@ -1270,23 +1480,31 @@ void uiMouseDown(float x, float y) {
     downY = y;
     mouseX = x;
     mouseY = y;
+    pendingDrag = nullptr;
     Hit* hit = hitAt(x, y);
-    if (hit && hit->drag) {
-        dragging = hit->drag;
-        dragging(x, y, false);
-        invalidate();
-    }
+    if (!hit || !hit->drag) return;
+    // Something that's also clickable only starts dragging once the pointer has moved.
+    if (hit->click) { pendingDrag = hit->drag; return; }
+    dragging = hit->drag;
+    dragging(x, y, false);
+    invalidate();
 }
 
 void uiMouseMove(float x, float y) {
     mouseIn = true;
     mouseX = x;
     mouseY = y;
+    if (pendingDrag && (fabsf(x - downX) > 5 || fabsf(y - downY) > 5)) {
+        dragging = pendingDrag;
+        pendingDrag = nullptr;
+        dragging(downX, downY, false);
+    }
     if (dragging) dragging(x, y, false);
     invalidate();
 }
 
 void uiMouseUp(float x, float y) {
+    pendingDrag = nullptr;
     if (dragging) {
         auto fn = dragging;
         dragging = nullptr;
@@ -1296,13 +1514,20 @@ void uiMouseUp(float x, float y) {
     }
     Hit* hit = hitAt(x, y);
     if (hit && hit->click && hit->r.has(downX, downY)) {
-        bool focused = app.searchFocus;
         app.searchFocus = false;
         auto fn = hit->click;      // the click may redraw and replace the hits
         fn();
-        (void)focused;
     } else app.searchFocus = false;
     invalidate();
+}
+
+void uiRightClick(float x, float y) {
+    for (size_t i = hits.size(); i > 0; i--) {
+        Hit& hit = hits[i - 1];
+        if (!hit.r.has(x, y)) continue;
+        if (hit.context) { auto fn = hit.context; fn(x, y); invalidate(); }
+        return;
+    }
 }
 
 void uiMouseLeave() {
@@ -1311,6 +1536,12 @@ void uiMouseLeave() {
 }
 
 void uiWheel(float x, float y, float delta) {
+    if (app.settings.tab == Tab::Lyrics && app.lyricsSynced && y > TOP && !app.menuOpen && !app.ctxOpen && !app.tucked) {
+        app.lyricsNudge = std::max(-3000.0f, std::min(3000.0f, app.lyricsNudge - delta * 70));
+        app.lyricsNudgeUntil = nowMs() + 3500;
+        invalidate();
+        return;
+    }
     for (size_t i = scrolls.size(); i > 0; i--) {
         ScrollArea& area = scrolls[i - 1];
         if (!area.r.has(x, y)) continue;
@@ -1320,33 +1551,47 @@ void uiWheel(float x, float y, float delta) {
     }
 }
 
+// What's being typed into right now, if anything.
+static wstring* typingInto() {
+    if (app.naming && app.settings.tab == Tab::Library && app.libraryPages.empty()) return &app.newName;
+    if (app.searchFocus && app.settings.tab == Tab::Search && app.searchPages.empty()) return &app.query;
+    return nullptr;
+}
+
 bool uiChar(wchar_t c) {
-    if (!app.searchFocus || app.settings.tab != Tab::Search || !app.searchPages.empty()) return false;
-    if (c == L'\r') { runSearch(); return true; }
-    if (c == 8) { if (!app.query.empty()) app.query.pop_back(); app.suggestDue = nowMs() + 170; invalidate(); return true; }
-    if (c == 27) { app.searchFocus = false; invalidate(); return true; }
-    if (c < 32) return false;
-    if (app.query.size() < 200) app.query.push_back(c);
-    app.suggestDue = nowMs() + 170;
+    wstring* text = typingInto();
+    if (!text) return false;
+    bool naming = text == &app.newName;
+    if (c == L'\r') {
+        if (naming) { createPlaylist(U(app.newName)); app.naming = false; app.newName.clear(); }
+        else runSearch();
+        invalidate();
+        return true;
+    }
+    if (c == 27) { if (naming) { app.naming = false; app.newName.clear(); } else app.searchFocus = false; invalidate(); return true; }
+    if (c == 8) { if (!text->empty()) text->pop_back(); }
+    else if (c < 32) return false;
+    else if (text->size() < (naming ? 80u : 200u)) text->push_back(c);
+    if (!naming) app.suggestDue = nowMs() + 170;
     invalidate();
     return true;
 }
 
 bool uiKey(WPARAM key, bool ctrl) {
-    bool typing = app.searchFocus && app.settings.tab == Tab::Search && app.searchPages.empty();
-    if (typing) {
+    if (wstring* text = typingInto()) {
         if (ctrl && key == 'V') {
             if (OpenClipboard(nullptr)) {
                 HANDLE data = GetClipboardData(CF_UNICODETEXT);
                 if (data) {
-                    const wchar_t* text = (const wchar_t*)GlobalLock(data);
-                    if (text) {
-                        for (const wchar_t* p = text; *p && app.query.size() < 200; p++) if (*p >= 32) app.query.push_back(*p);
+                    const wchar_t* from = (const wchar_t*)GlobalLock(data);
+                    if (from) {
+                        for (const wchar_t* p = from; *p && text->size() < 200; p++) if (*p >= 32) text->push_back(*p);
                         GlobalUnlock(data);
                     }
                 }
                 CloseClipboard();
             }
+            if (text == &app.query) app.suggestDue = nowMs() + 170;
             invalidate();
             return true;
         }
@@ -1357,6 +1602,7 @@ bool uiKey(WPARAM key, bool ctrl) {
         case VK_LEFT: seekTo(audio::position() - 5); return true;
         case VK_RIGHT: seekTo(audio::position() + 5); return true;
         case VK_ESCAPE:
+            if (app.ctxOpen) { app.ctxOpen = false; invalidate(); return true; }
             if (app.menuOpen) { app.menuOpen = false; invalidate(); return true; }
             return false;
         default: return false;

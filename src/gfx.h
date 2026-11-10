@@ -46,6 +46,9 @@ void glow(float cx, float cy, float rx, float ry, Color c);
 void wave(Rect r, float progress, float phase, float amplitude, Color c);
 
 void text(const string& s, Rect r, float size, int weight, Color c, int align = AlignLeft, bool wrap = false, bool top = false, float spacing = 0);
+// A wrapped lyric line: [dim] all over, then [bright] over its first [sungChars] letters (UTF-16)
+// and over [wordPart] (0..1) of the [wordChars] after them.
+void textSung(const string& s, Rect r, float size, int weight, Color dim, Color bright, int sungChars, int wordChars, float wordPart);
 float textWidth(const string& s, float size, int weight, float spacing = 0);
 float textHeight(const string& s, float width, float size, int weight);
 void icon(Icon which, Rect r, Color c);
@@ -59,6 +62,8 @@ bool imageColor(const string& url, Color& out);
 // Called (on the window's thread) when an image arrives, so the window can draw again.
 void onImage(std::function<void()> fn);
 void forgetImages();
+// Lets go of the pixels of every image not drawn in the last [keepMs], and of the painted background.
+void trimImages(long long keepMs);
 
 // Paints something costly once (at the origin, [r] in size) and reuses the picture until [key] changes.
 void cached(const string& key, Rect r, const std::function<void()>& paintIt);

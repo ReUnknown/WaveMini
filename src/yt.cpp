@@ -924,3 +924,19 @@ yt::Suggestions yt::suggest(const string& input) {
     }
     return out;
 }
+
+// ---------------------------------------------------------------- Changing your library
+
+bool yt::removeFromPlaylist(const string& playlistId, const string& videoId, const string& setVideoId) {
+    Json root = post("browse/edit_playlist", field("playlistId", playlistId) + ",\"actions\":[{\"action\":\"ACTION_REMOVE_VIDEO\"," +
+                     field("removedVideoId", videoId) + "," + field("setVideoId", setVideoId) + "}]");
+    return root["status"].str() == "STATUS_SUCCEEDED";
+}
+
+string yt::createPlaylist(const string& title) {
+    return post("playlist/create", field("title", title) + ",\"privacyStatus\":\"PRIVATE\"")["playlistId"].str();
+}
+
+bool yt::saveList(const string& playlistId, bool saved) {
+    return post(saved ? "like/like" : "like/removelike", "\"target\":{" + field("playlistId", playlistId) + "}").has();
+}

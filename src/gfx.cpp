@@ -215,6 +215,7 @@ struct CachedImage {
     Color color;
     bool hasColor = false, loading = false, failed = false;
     long long used = 0;
+    size_t bytes = 0;               // of pixels held
 };
 std::map<string, CachedImage> images;
 
@@ -280,13 +281,17 @@ CachedImage* imageFor(const string& url, bool soft) {
     entry.used = nowMs();
     if (!entry.bitmap && !entry.pixels && !entry.loading && !entry.failed) {
         entry.loading = true;
-        if (images.size() > 80) {
-            // Too many: forget the ones not drawn for the longest.
+        // A budget of pixels rather than a count: past it, the covers not drawn for the
+        // longest are forgotten (they come back from the network if they're needed again).
+        size_t held = 0;
+        for (auto& kv : images) held += kv.second.bytes;
+        if (held > 6 * 1024 * 1024 || images.size() > 120) {
             std::vector<std::pair<long long, string>> byAge;
             for (auto& kv : images) if (!kv.second.loading) byAge.emplace_back(kv.second.used, kv.first);
             std::sort(byAge.begin(), byAge.end());
-            for (size_t i = 0; i < byAge.size() && images.size() > 50; i++) {
+            for (size_t i = 0; i < byAge.size() && (held > 4 * 1024 * 1024 || images.size() > 90); i++) {
                 CachedImage& old = images[byAge[i].second];
+                held -= std::min(held, old.bytes);
                 drop(old.bitmap);
                 drop(old.pixels);
                 images.erase(byAge[i].second);
@@ -297,6 +302,9 @@ CachedImage* imageFor(const string& url, bool soft) {
             [key, soft](string bytes) { decode(key, bytes, soft); if (imageArrived) imageArrived(); });
     }
     if (!entry.bitmap && entry.pixels && target) {
+        UINT pw = 0, ph = 0;
+        entry.pixels->GetSize(&pw, &ph);
+        entry.bytes = (size_t)pw * ph * 4;
         rt->CreateBitmapFromWicBitmap(entry.pixels, nullptr, &entry.bitmap);
         drop(entry.pixels);
     }
@@ -410,6 +418,22 @@ void gfx::forgetImages() {
     for (auto it = images.begin(); it != images.end();) it = it->second.loading ? std::next(it) : images.erase(it);
 }
 
+void gfx::trimImages(long long keepMs) {
+    long long now = nowMs();
+    for (auto it = images.begin(); it != images.end();) {
+        CachedImage& entry = it->second;
+        if (entry.loading || now - entry.used <= keepMs) { ++it; continue; }
+        // The color stays known (it's a few bytes); the pixels go.
+        drop(entry.bitmap);
+        drop(entry.pixels);
+        entry.bytes = 0;
+        if (entry.hasColor) ++it;
+        else it = images.erase(it);
+    }
+    drop(cachedPicture);
+    cachedKey.clear();
+}
+
 // ---------------------------------------------------------------- Shapes
 
 void gfx::fill(Rect r, Color c, float radius) {
@@ -499,6 +523,30 @@ void gfx::text(const string& s, Rect r, float size, int weight, Color c, int ali
     l->SetTextAlignment(align == AlignCenter ? DWRITE_TEXT_ALIGNMENT_CENTER : align == AlignRight ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING);
     l->SetParagraphAlignment(top ? DWRITE_PARAGRAPH_ALIGNMENT_NEAR : DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    l->Release();
+}
+
+void gfx::textSung(const string& s, Rect r, float size, int weight, Color dim, Color bright, int sungChars, int wordChars, float wordPart) {
+    if (s.empty() || r.w <= 0) return;
+    IDWriteTextLayout* l = layout(s, r.w, r.h, size, weight, true, 0);
+    if (!l) return;
+    l->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(dim));
+    // The sung part again in the bright color, clipped to where those letters are.
+    auto over = [&](int from, int count, float part) {
+        if (count <= 0 || part <= 0) return;
+        DWRITE_HIT_TEST_METRICS boxes[8];
+        UINT32 got = 0;
+        if (FAILED(l->HitTestTextRange((UINT32)from, (UINT32)count, r.x, r.y, boxes, 8, &got))) return;
+        for (UINT32 i = 0; i < got; i++) {
+            float w = boxes[i].width * (got == 1 ? part : (i + 1 < got ? 1.0f : part));
+            rt->PushAxisAlignedClip(D2D1::RectF(boxes[i].left, boxes[i].top - 2, boxes[i].left + w, boxes[i].top + boxes[i].height + 2), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(bright));
+            rt->PopAxisAlignedClip();
+        }
+    };
+    over(0, sungChars, 1);
+    over(sungChars, wordChars, wordPart);
     l->Release();
 }
 
