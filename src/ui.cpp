@@ -49,6 +49,7 @@ float glide(int key, float target, float stiffness = 420, float damping = 0.82f)
     auto found = springs.find(key);
     if (found == springs.end()) { springs[key] = Spring{target, 0}; return target; }
     Spring& s = found->second;
+    if (frameDt < 0) { s.x = target; s.v = 0; return target; }   // settle at once (the render check)
     float left = std::min(frameDt, 0.05f);
     while (left > 0) {
         float h = std::min(left, 0.006f);
@@ -64,7 +65,8 @@ float glide(int key, float target, float stiffness = 420, float damping = 0.82f)
 // 0 -> 1 after [key] changes: what's new fades and slides in.
 struct Arrival { string key; float t = 1; };
 float arrive(Arrival& a, const string& key, float seconds = 0.24f) {
-    if (a.key != key) { a.key = key; a.t = 0; }
+    if (frameDt < 0) { a.key = key; a.t = 1; }
+    else if (a.key != key) { a.key = key; a.t = 0; }
     else if (a.t < 1) a.t = std::min(1.0f, a.t + frameDt / seconds);
     if (a.t < 1) animating = true;
     float left = 1 - a.t;
@@ -233,10 +235,10 @@ void pickTheme() {
     }
     static bool first = true;
     if (first) { theme = want; first = false; return; }
-    float k = 1 - expf(-frameDt * 7);
+    float k = frameDt < 0 ? 1.0f : 1 - expf(-frameDt * 7);
     auto step = [k](Color& from, Color to) {
         float apart = fabsf(from.r - to.r) + fabsf(from.g - to.g) + fabsf(from.b - to.b);
-        if (apart < 0.006f) { from = to; return; }
+        if (apart < 0.006f || k >= 1) { from = to; return; }
         from = mix(from, to, k);
         animating = true;
     };

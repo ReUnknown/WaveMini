@@ -350,6 +350,7 @@ static void savePicture(const wstring& dir, const wchar_t* name) {
     HGDIOBJ before = SelectObject(dc, picture);
     // Twice, with messages handled in between, so covers that were asked for have arrived.
     for (int pass = 0; pass < 2; pass++) {
+        uiFrame(-1);   // no motion in a still picture: everything at rest
         if (gfx::begin(dc, w, h, s)) { draw(want.w, want.h, want.w, want.h); gfx::end(); }
         if (pass == 0) {
             long long until = nowMs() + 2500;
