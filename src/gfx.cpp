@@ -218,8 +218,8 @@ struct CachedImage {
 };
 std::map<string, CachedImage> images;
 
-void decode(const string& url, const string& bytes) {
-    CachedImage& entry = images[url];
+void decode(const string& key, const string& bytes, bool soft) {
+    CachedImage& entry = images[key];
     entry.loading = false;
     entry.failed = true;
     if (bytes.empty() || !wic) return;
@@ -227,11 +227,22 @@ void decode(const string& url, const string& bytes) {
     IWICBitmapDecoder* decoder = nullptr;
     IWICBitmapFrameDecode* frame = nullptr;
     IWICFormatConverter* converter = nullptr;
+    IWICBitmapScaler* scaler = nullptr;
     if (stream && SUCCEEDED(wic->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
         SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(wic->CreateFormatConverter(&converter)) &&
-        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeMedianCut)) &&
-        SUCCEEDED(wic->CreateBitmapFromSource(converter, WICBitmapCacheOnLoad, &entry.pixels))) {
-        entry.failed = false;
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeMedianCut))) {
+        IWICBitmapSource* source = converter;
+        UINT w = 0, h = 0;
+        converter->GetSize(&w, &h);
+        if (soft && std::min(w, h) > 12 && SUCCEEDED(wic->CreateBitmapScaler(&scaler))) {
+            // Average nearby pixels once. Linear interpolation softens the preview when drawn.
+            double ratio = 12.0 / std::min(w, h);
+            if (SUCCEEDED(scaler->Initialize(converter, (UINT)lround(w * ratio), (UINT)lround(h * ratio), WICBitmapInterpolationModeFant)))
+                source = scaler;
+        }
+        entry.failed = FAILED(wic->CreateBitmapFromSource(source, WICBitmapCacheOnLoad, &entry.pixels));
+    }
+    if (!entry.failed && !soft) {
         // The overall color: the average of its livelier pixels.
         UINT w = 0, h = 0;
         entry.pixels->GetSize(&w, &h);
@@ -255,15 +266,17 @@ void decode(const string& url, const string& bytes) {
             lock->Release();
         }
     }
+    drop(scaler);
     drop(converter);
     drop(frame);
     drop(decoder);
     drop(stream);
 }
 
-CachedImage* imageFor(const string& url) {
+CachedImage* imageFor(const string& url, bool soft) {
     if (url.empty()) return nullptr;
-    CachedImage& entry = images[url];
+    string key = soft ? "soft:" + url : url;
+    CachedImage& entry = images[key];
     entry.used = nowMs();
     if (!entry.bitmap && !entry.pixels && !entry.loading && !entry.failed) {
         entry.loading = true;
@@ -281,13 +294,13 @@ CachedImage* imageFor(const string& url) {
         }
         string address = url;
         async<string>([address] { HttpRes res = http("GET", address); return res.ok() ? res.body : string(); },
-            [address](string bytes) { decode(address, bytes); if (imageArrived) imageArrived(); });
+            [key, soft](string bytes) { decode(key, bytes, soft); if (imageArrived) imageArrived(); });
     }
     if (!entry.bitmap && entry.pixels && target) {
         rt->CreateBitmapFromWicBitmap(entry.pixels, nullptr, &entry.bitmap);
         drop(entry.pixels);
     }
-    return &images[url];
+    return &entry;
 }
 
 ID2D1RoundedRectangleGeometry* roundedGeometry(Rect r, float radius) {
@@ -530,8 +543,8 @@ bool gfx::imageColor(const string& url, Color& out) {
     return true;
 }
 
-bool gfx::image(const string& url, Rect r, float radius, float fadeFrom) {
-    CachedImage* entry = imageFor(url);
+bool gfx::image(const string& url, Rect r, float radius, float fadeFrom, bool soft) {
+    CachedImage* entry = imageFor(url, soft);
     if (!entry || !entry->bitmap) return false;
     D2D1_SIZE_F size = entry->bitmap->GetSize();
     // Fill the rect, cropping what doesn't fit (covers are square; video stills aren't).

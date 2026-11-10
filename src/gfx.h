@@ -52,7 +52,8 @@ void icon(Icon which, Rect r, Color c);
 
 // Draws the image at [url] (fetched and decoded on first use; false until it's there).
 // [fadeFrom] < 1 fades it out to the right, starting at that fraction of its width.
-bool image(const string& url, Rect r, float radius, float fadeFrom = 1);
+// [soft] uses a small, averaged preview for blurred backgrounds.
+bool image(const string& url, Rect r, float radius, float fadeFrom = 1, bool soft = false);
 // The image's overall color, once it has loaded.
 bool imageColor(const string& url, Color& out);
 // Called (on the window's thread) when an image arrives, so the window can draw again.

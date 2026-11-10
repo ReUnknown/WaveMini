@@ -80,6 +80,7 @@ typedef std::vector<std::pair<string, string>> Headers;
 struct HttpRes {
     int status = 0;          // 0 = couldn't connect
     string body;
+    string contentRange;
     long long contentLength = -1;
     bool ok() const { return status >= 200 && status < 300; }
 };

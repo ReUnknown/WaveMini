@@ -132,6 +132,8 @@ void signedIn(const Session& s) {
 }
 
 void signOut() {
+    signin::close();
+    app.signingIn = false;
     audio::pause();
     audio::close();
     app.generation++;
@@ -213,7 +215,33 @@ void setSleep(int minutes) {
 
 // ---------------------------------------------------------------- Playing
 
-static int failures = 0;
+static unsigned rejectedAudioClients = 0;
+static AudioClient activeAudioClient = AudioClient::None;
+static bool waitingForNext = false;
+
+static void loadAudio(const Item& song, bool retryVerified, const string& previousError = "") {
+    int generation = app.generation;
+    bool saver = app.settings.saver;
+    unsigned rejected = rejectedAudioClients;
+    async<AudioPick>([song, saver, retryVerified, rejected] {
+        return yt::audio(song.id, saver, retryVerified, rejected);
+    }, [song, generation, previousError](AudioPick pick) {
+        if (generation != app.generation) return;
+        if (pick.url.empty()) {
+            app.loading = false;
+            app.needsVerification = pick.needsVerification;
+            app.error = pick.error;
+            if (!pick.needsVerification && !previousError.empty()) app.error = previousError;
+            if (app.error.empty()) app.error = "This song can't be played";
+        } else {
+            activeAudioClient = pick.client;
+            // Songs mastered louder than YouTube's reference are turned down to it.
+            app.loudnessGain = pick.hasLoudness && pick.loudnessDb > 0 ? pow(10.0, -pick.loudnessDb / 20.0) : 1;
+            audio::open(song.id, pick.url, pick.userAgent, pick.length, generation, song.durationMs / 1000.0);
+        }
+        invalidate();
+    });
+}
 
 static void fetchMore() {
     if (app.fetchingMore || app.continuation.empty()) return;
@@ -231,15 +259,19 @@ static void fetchMore() {
     });
 }
 
-void playIndex(int index) {
+void playIndex(int index, bool retryVerified) {
     if (index < 0 || index >= (int)app.queue.size()) return;
     app.index = index;
     app.loading = true;
     app.playing = false;
     app.wantPlay = true;
     app.error.clear();
+    app.needsVerification = false;
     app.queueScroll = 0;
-    int generation = ++app.generation;
+    ++app.generation;
+    waitingForNext = false;
+    rejectedAudioClients = 0;
+    activeAudioClient = AudioClient::None;
     audio::pause();
     audio::close();
     const Item song = app.queue[index];
@@ -248,20 +280,7 @@ void playIndex(int index) {
     app.lyricsFor.clear();
     app.lyricsScroll = 0;
     if (app.settings.tab == Tab::Lyrics) loadLyrics();
-    bool saver = app.settings.saver;
-    async<AudioPick>([song, saver] { return yt::audio(song.id, saver); }, [song, generation](AudioPick pick) {
-        if (generation != app.generation) return;
-        if (!pick.error.empty() || pick.url.empty()) {
-            app.loading = false;
-            app.error = pick.error.empty() ? "This song can't be played" : pick.error;
-            invalidate();
-            return;
-        }
-        // Songs mastered louder than YouTube's reference are turned down to it.
-        app.loudnessGain = pick.hasLoudness && pick.loudnessDb > 0 ? pow(10.0, -pick.loudnessDb / 20.0) : 1;
-        audio::open(song.id, pick.url, pick.userAgent, pick.length, generation);
-        invalidate();
-    });
+    loadAudio(song, retryVerified);
     if (app.session.signedIn()) background([song] { yt::reportPlay(song.id); });
     if (app.settings.autoplay && (int)app.queue.size() - index <= 3) fetchMore();
     saveState();
@@ -274,7 +293,6 @@ void playSongs(const std::vector<Item>& songs, int index, const string& source, 
     app.source = source;
     app.continuation = continuation;
     app.shuffle = false;
-    failures = 0;
     playIndex(std::max(0, std::min(index, (int)songs.size() - 1)));
 }
 
@@ -333,6 +351,7 @@ void playLast(bool shuffled) {
 void togglePlay() {
     if (!app.current()) { playLast(false); return; }
     if (app.loading) { app.wantPlay = !app.wantPlay; return; }
+    if (app.needsVerification) { verifyPlayback(); return; }
     if (!app.error.empty()) { playIndex(app.index); return; }
     if (audio::paused()) { app.wantPlay = true; audio::play(); }
     else { app.wantPlay = false; audio::pause(); }
@@ -343,7 +362,12 @@ void nextSong(bool byUser) {
     if (app.repeat == 2 && !byUser) { audio::seek(0); audio::play(); return; }
     if (app.index + 1 < (int)app.queue.size()) { playIndex(app.index + 1); return; }
     if (app.repeat == 1) { playIndex(0); return; }
-    if (!app.continuation.empty() && app.settings.autoplay) { fetchMore(); showToast("Finding more songs..."); return; }
+    if (!app.continuation.empty() && app.settings.autoplay) {
+        waitingForNext = !byUser;
+        fetchMore();
+        showToast("Finding more songs...");
+        return;
+    }
     app.playing = false;
     app.wantPlay = false;
     audio::pause();
@@ -391,31 +415,56 @@ void toggleLike() {
     invalidate();
 }
 
+static void retryAudio(AudioEvent event, const string& error) {
+    if (const Item* song = app.current()) {
+        ++app.generation;
+        rejectedAudioClients |= (unsigned)activeAudioClient;
+        activeAudioClient = AudioClient::None;
+        if (event == AudioEvent::DownloadFailed) audio::close();
+        else audio::discard();
+        app.loading = true;
+        loadAudio(*song, false, error);
+    }
+}
+
 void onAudio(AudioEvent event, LPARAM token) {
     if ((int)token != app.generation) return;
     switch (event) {
         case AudioEvent::Ready:
             app.loading = false;
-            failures = 0;
             applyVolume();
             audio::setRate(app.settings.rate);
             if (app.wantPlay) audio::play();
             break;
         case AudioEvent::Playing: app.playing = true; break;
         case AudioEvent::Paused: app.playing = false; break;
-        case AudioEvent::Ended: app.playing = false; nextSong(false); break;
-        case AudioEvent::Failed:
+        case AudioEvent::Ended:
+            app.playing = false;
+            if (!app.wantPlay || !app.error.empty()) break;
+            if (audio::finished()) {
+                audio::pause();
+                nextSong(false);
+            } else {
+                retryAudio(event, "Windows stopped playback before the song ended");
+            }
+            break;
+        case AudioEvent::Unavailable:
             app.loading = false;
             app.playing = false;
-            app.error = "Couldn't play this song";
-            // Move on by itself, but not through a whole queue of failures.
-            if (++failures <= 2 && app.index + 1 < (int)app.queue.size()) playIndex(app.index + 1);
+            app.error = "Windows Media Player is unavailable";
+            break;
+        case AudioEvent::DownloadFailed:
+        case AudioEvent::Failed:
+            app.playing = false;
+            retryAudio(event, event == AudioEvent::DownloadFailed ?
+                       "Couldn't download this song from YouTube" : "Windows couldn't play this audio");
             break;
     }
     invalidate();
 }
 
 void tick() {
+    audio::observePlayback();
     long long now = nowMs();
     if (app.sleepAt && now >= app.sleepAt) {
         app.sleepAt = 0;
@@ -425,10 +474,14 @@ void tick() {
         invalidate();
     }
     if (app.toastUntil && now >= app.toastUntil) { app.toastUntil = 0; app.toast.clear(); invalidate(); }
-    // A song that came in after "finding more songs": carry on.
-    if (app.current() && !app.playing && !app.loading && app.wantPlay && app.error.empty() && app.index + 1 < (int)app.queue.size() &&
-        audio::duration() > 0 && audio::position() >= audio::duration() - 0.3)
-        playIndex(app.index + 1);
+    // Continue only if a real end-of-track event requested another radio page.
+    if (waitingForNext && app.current() && app.wantPlay && app.error.empty()) {
+        if (app.index + 1 < (int)app.queue.size()) playIndex(app.index + 1);
+        else if (!app.fetchingMore && app.continuation.empty()) {
+            waitingForNext = false;
+            app.wantPlay = false;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- Lyrics

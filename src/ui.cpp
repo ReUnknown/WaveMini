@@ -262,7 +262,11 @@ void drawPlayer() {
     gfx::text(artist, artistRect, 13, Regular, white(overArtist ? 1.0f : 0.75f));
 
     // Where you are in the song (or what went wrong).
-    if (!app.error.empty()) {
+    if (app.needsVerification) {
+        float x = left + pill(left, 62, 30, app.signingIn ? "Waiting for YouTube" : "Verify on YouTube", -1,
+                              true, 12, 9, 8, verifyPlayback) + 6;
+        pill(x, 62, 30, "Open in browser", -1, false, 12, 9, 8, openSongInBrowser);
+    } else if (!app.error.empty()) {
         gfx::text(app.error, Rect{left, 62, W_ - left - 16, 30}, 12.5f, Semi, theme.soft, AlignLeft, true, false);
     } else {
         double length = audio::duration(), at = audio::position();
@@ -940,10 +944,11 @@ void drawSignIn(float w, float h) {
 
 void drawTucked() {
     string art = playerArt();
-    gfx::circle(28, 28, 28, theme.accent);
-    if (!art.empty()) gfx::image(artAt(art, 120), Rect{3, 3, 50, 50}, 25);
-    else gfx::circle(28, 28, 25, hex(0x36618E));
-    gfx::circle(28, 28, 25, Color{0, 0, 0, art.empty() ? 0.0f : 0.35f});
+    Rect circle{0, 0, 56, 56};
+    if (gfx::image(artAt(art, 120), circle.inset(-6), 0, 1, true))
+        gfx::fill(circle, Color{0, 0, 0, 0.35f});
+    else
+        gfx::fill(circle, hex(0x36618E));
     gfx::icon(Icon::Wave, Rect{8, 8, 40, 40}, white());
 }
 

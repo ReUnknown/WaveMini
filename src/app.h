@@ -44,6 +44,7 @@ struct App {
     std::vector<Item> queue;
     int index = -1;
     string source, continuation, error;
+    bool needsVerification = false;
     bool shuffle = false, loading = false, playing = false, wantPlay = false;
     int repeat = 0;                // 0 off, 1 all, 2 one
     int generation = 0;            // bumps with every song opened; stale answers are dropped
@@ -108,7 +109,7 @@ void playSongs(const std::vector<Item>& songs, int index, const string& source, 
 void playRadio(const Item& song);
 void playItem(const Item& item, bool shuffled = false);   // a song, an album or a playlist
 void playLast(bool shuffled);
-void playIndex(int index);
+void playIndex(int index, bool retryVerified = false);
 void togglePlay();
 void nextSong(bool byUser);
 void previousSong();
@@ -152,4 +153,6 @@ void invalidate();
 void windowTuck(bool tuck);
 void windowClose();
 void startSignIn();
+void verifyPlayback();
+void openSongInBrowser();
 void applyOnTop();

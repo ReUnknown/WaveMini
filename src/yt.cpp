@@ -3,6 +3,8 @@
 static const char* Origin = "https://music.youtube.com";
 static const char* BrowserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 
+string yt::watchUrl(const string& videoId) { return string(Origin) + "/watch?v=" + urlEncode(videoId); }
+
 static std::mutex gate;
 static Session current;
 static string clientVersion = "1.20261020.10.00";
@@ -109,8 +111,8 @@ static Headers headersFor(const Session& s, const string& version) {
         {"Content-Type", "application/json"},
     };
     if (!s.visitorData.empty()) h.push_back({"X-Goog-Visitor-Id", s.visitorData});
-    if (!s.cookie.empty()) {
-        h.push_back({"Cookie", s.cookie});
+    if (!s.cookie.empty()) h.push_back({"Cookie", s.cookie});
+    if (s.signedIn()) {
         string sapisid = cookieValue(s.cookie, "SAPISID");
         if (sapisid.empty()) sapisid = cookieValue(s.cookie, "__Secure-3PAPISID");
         if (!sapisid.empty()) {
@@ -608,42 +610,204 @@ string yt::plainLyrics(const string& lyricsBrowseId) {
     return root.at("contents", "sectionListRenderer", "contents", 0, "musicDescriptionShelfRenderer", "description").text();
 }
 
-AudioPick yt::audio(const string& videoId, bool saver) {
+static string rangeUrl(string url, const string& bounds) {
+    size_t key = url.find("?range=");
+    if (key == string::npos) key = url.find("&range=");
+    if (key == string::npos) {
+        url += (url.find('?') == string::npos ? "?range=" : "&range=") + bounds;
+    } else {
+        size_t start = key + 7;
+        size_t end = url.find('&', start);
+        url.replace(start, end == string::npos ? string::npos : end - start, bounds);
+    }
+    return url;
+}
+
+static string audioRange(const string& url, const string& agent, long long length,
+                         long long start, long long end, const std::atomic<bool>* cancel = nullptr) {
+    string bounds = std::to_string(start) + "-" + std::to_string(end);
+    string expected = "bytes " + bounds + "/" + std::to_string(length);
+    size_t size = (size_t)(end - start + 1);
+    string bytes;
+    bytes.reserve(size);
+    bool oversized = false;
+    auto collect = [&](const char* data, size_t count) {
+        if (count > size - bytes.size()) {
+            oversized = true;
+            return false;
+        }
+        bytes.append(data, count);
+        return true;
+    };
+
+    // YoutubeExplode uses the CDN's range query. It commonly returns 200 for just that segment.
+    Headers headers = {{"User-Agent", agent}};
+    HttpRes res = http("GET", rangeUrl(url, bounds), headers, "", collect, cancel);
+    if (!oversized && bytes.size() == size &&
+        ((res.status == 206 && res.contentRange == expected) ||
+         (res.status == 200 && (res.contentRange.empty() || res.contentRange == expected))))
+        return bytes;
+    if (cancel && cancel->load()) return "";
+
+    // Some URLs support the regular HTTP range header instead.
+    bytes.clear();
+    oversized = false;
+    headers.emplace_back("Range", "bytes=" + bounds);
+    res = http("GET", url, headers, "", collect, cancel);
+    if (!oversized && bytes.size() == size &&
+        ((res.status == 206 && res.contentRange == expected) ||
+         (res.status == 200 && start == 0 && end == length - 1 && res.contentLength == length)))
+        return bytes;
+    return "";
+}
+
+bool yt::pullAudio(const string& url, const string& agent, long long length,
+                   const std::function<bool(const char*, size_t)>& sink, const std::atomic<bool>* cancel) {
+    if (length < 8 || !sink) return false;
+    constexpr long long piece = 1024 * 1024;
+    for (long long start = 0; start < length;) {
+        long long end = start + std::min(piece, length - start) - 1;
+        string bytes;
+        for (int attempt = 0; attempt < 3 && !(cancel && cancel->load()); ++attempt) {
+            bytes = audioRange(url, agent, length, start, end, cancel);
+            if (!bytes.empty()) break;
+        }
+        if ((cancel && cancel->load()) || bytes.empty() ||
+            (start == 0 && bytes.compare(4, 4, "ftyp") != 0) ||
+            !sink(bytes.data(), bytes.size()))
+            return false;
+        start = end + 1;
+    }
+    return true;
+}
+
+static AudioPick pickAudio(const Json& root, const string& videoId, const string& agent, bool saver) {
     AudioPick pick;
-    yt::warmUp();
-    Session s = session();
-    // The client YouTube gives plain links to. They only play for the app that asked, so
-    // WaveMini downloads the audio itself (see audio.cpp) with the same user agent.
-    pick.userAgent = "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
-    string body = "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.62.27\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\","
-                  "\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"hl\":\"en\",\"gl\":\"US\"";
-    if (!s.visitorData.empty()) body += ",\"visitorData\":" + jq(s.visitorData);
-    body += "}}," + field("videoId", videoId) + ",\"contentCheckOk\":true,\"racyCheckOk\":true}";
-    Headers h = {{"User-Agent", pick.userAgent}, {"Content-Type", "application/json"}, {"X-Youtube-Client-Name", "28"}, {"X-Youtube-Client-Version", "1.62.27"}};
-    if (!s.visitorData.empty()) h.push_back({"X-Goog-Visitor-Id", s.visitorData});
-    HttpRes res = http("POST", "https://www.youtube.com/youtubei/v1/player?prettyPrint=false", h, body);
-    if (!res.ok()) { pick.error = res.status == 0 ? "No connection" : "YouTube didn't answer"; return pick; }
-    Json root = Json::parse(res.body);
-    string status = root.at("playabilityStatus", "status").str();
-    long long bestRate = -1;
-    for (auto& f : root.at("streamingData", "adaptiveFormats").each()) {
-        if (!startsWith(f["mimeType"].str(), "audio/mp4") || f["url"].str().empty()) continue;
-        // Skip dubbed tracks: keep the original audio.
-        if (f["audioTrack"].has() && !f.at("audioTrack", "audioIsDefault").truthy()) continue;
-        long long rate = (long long)f["bitrate"].num();
-        if (bestRate < 0 || (saver ? rate < bestRate : rate > bestRate)) {
-            bestRate = rate;
-            pick.url = f["url"].str();
-            pick.length = (long long)f["contentLength"].num();
+    pick.userAgent = agent;
+    string resolved = root.at("videoDetails", "videoId").str();
+    if (!resolved.empty() && resolved != videoId) {
+        pick.error = "YouTube returned a different song";
+        return pick;
+    }
+    const Json& status = root["playabilityStatus"];
+    if (status["status"].str() == "OK") {
+        std::vector<const Json*> formats;
+        for (auto& f : root.at("streamingData", "adaptiveFormats").each()) {
+            const Json& original = f.at("audioTrack", "audioIsDefault");
+            if (original.has() && !original.truthy()) continue;
+            if (startsWith(f["mimeType"].str(), "audio/mp4") && startsWith(f["url"].str(), "https://"))
+                formats.push_back(&f);
+        }
+        std::stable_sort(formats.begin(), formats.end(), [saver](const Json* a, const Json* b) {
+            double first = (*a)["bitrate"].num(), second = (*b)["bitrate"].num();
+            return saver ? first < second : first > second;
+        });
+        for (const Json* format : formats) {
+            const Json& f = *format;
+            string url = f["url"].str();
+            long long length = (long long)f["contentLength"].num();
+            if (length <= 0) {
+                HttpRes head = http("HEAD", url, {{"User-Agent", agent}});
+                if (head.ok()) length = head.contentLength;
+            }
+            if (length < 8 || audioRange(url, agent, length, length - 2, length - 1).empty()) continue;
+            pick.url = std::move(url);
+            pick.length = length;
+            break;
         }
     }
     const Json& loud = root.at("playerConfig", "audioConfig", "loudnessDb");
     if (loud.has()) { pick.hasLoudness = true; pick.loudnessDb = loud.num(); }
     if (pick.url.empty()) {
-        pick.error = root.at("playabilityStatus", "reason").str();
-        if (pick.error.empty()) pick.error = status == "OK" ? "No audio for this song" : "This song can't be played";
+        pick.error = status["reason"].str();
+        const Json& message = status.at("errorScreen", "playerErrorMessageRenderer");
+        string details = lower(pick.error + " " + message["reason"].text() + " " + message["subreason"].text());
+        pick.needsVerification = contains(details, "not a bot");
+        if (pick.error.empty()) pick.error = status["status"].str() == "OK" ? "No audio for this song" : "This song can't be played";
     }
     return pick;
+}
+
+// Wave's Windows resolver (YoutubeExplode) gets a separate visitor ID for native playback.
+static string playbackVisitor() {
+    static std::mutex visitorGate;
+    static string visitor;
+    {
+        std::lock_guard<std::mutex> lock(visitorGate);
+        if (!visitor.empty()) return visitor;
+    }
+    HttpRes res = http("GET", "https://www.youtube.com/sw.js_data", {{"Accept", "application/json"},
+        {"User-Agent", "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip"}});
+    if (!res.ok()) return yt::session().visitorData;
+    if (startsWith(res.body, ")]}'")) res.body.erase(0, 4);
+    string fresh = Json::parse(res.body).at(0, 2, 0, 0, 13).str();
+    if (fresh.empty()) return yt::session().visitorData;
+    std::lock_guard<std::mutex> lock(visitorGate);
+    if (visitor.empty()) visitor = fresh;
+    return visitor;
+}
+
+static AudioPick requestAudio(const string& videoId, bool saver, const string& visitor,
+                              const string& clientFields, const string& agent, Headers headers = {}) {
+    string body = "{\"context\":{\"client\":{" + clientFields + ",\"hl\":\"en\",\"gl\":\"US\",\"utcOffsetMinutes\":0";
+    if (!visitor.empty()) body += ",\"visitorData\":" + jq(visitor);
+    body += "}}," + field("videoId", videoId) + ",\"contentCheckOk\":true,\"racyCheckOk\":true}";
+    headers.push_back({"User-Agent", agent});
+    headers.push_back({"Content-Type", "application/json"});
+    HttpRes res = http("POST", "https://www.youtube.com/youtubei/v1/player?prettyPrint=false", headers, body);
+    AudioPick pick = pickAudio(Json::parse(res.body), videoId, agent, saver);
+    if (!res.ok() && !pick.needsVerification) {
+        pick.url.clear();
+        pick.error = res.status == 0 ? "No connection" : "YouTube didn't answer";
+    }
+    return pick;
+}
+
+AudioPick yt::audio(const string& videoId, bool saver, bool retryVerified, unsigned rejected) {
+    using Client = AudioClient;
+    const Client order[] = {retryVerified ? Client::Music : Client::None, Client::Vision, Client::Android, Client::Vr,
+                            retryVerified ? Client::None : Client::Music};
+    AudioPick failure;
+    for (Client client : order) {
+        if (client == Client::None || (rejected & (unsigned)client)) continue;
+        AudioPick pick;
+        switch (client) {
+            case Client::Vision:
+                pick = requestAudio(videoId, saver, playbackVisitor(),
+                    "\"clientName\":\"VISIONOS\",\"clientVersion\":\"1.02\",\"deviceMake\":\"Apple\",\"deviceModel\":\"RealityDevice17,1\","
+                    "\"osName\":\"visionOS\",\"osVersion\":\"26.5.23O471\"",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15");
+                break;
+            case Client::Android:
+                pick = requestAudio(videoId, saver, playbackVisitor(),
+                    "\"clientName\":\"ANDROID\",\"clientVersion\":\"21.26.364\","
+                    "\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\"",
+                    "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip");
+                break;
+            case Client::Vr: {
+                const string agent = "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+                Headers headers = {{"X-Youtube-Client-Name", "28"}, {"X-Youtube-Client-Version", "1.62.27"}};
+                string visitor = session().visitorData;
+                if (visitor.empty()) visitor = playbackVisitor();
+                if (!visitor.empty()) headers.push_back({"X-Goog-Visitor-Id", visitor});
+                pick = requestAudio(videoId, saver, visitor,
+                    "\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.62.27\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\","
+                    "\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"", agent, std::move(headers));
+                break;
+            }
+            case Client::Music:
+                if (!retryVerified && !failure.needsVerification && rejected == 0) continue;
+                pick = pickAudio(post("player", field("videoId", videoId)), videoId, BrowserAgent, saver);
+                break;
+            default:
+                continue;
+        }
+        pick.client = client;
+        if (!pick.url.empty()) return pick;
+        if (pick.needsVerification || (!failure.needsVerification && client != Client::Music) || failure.error.empty())
+            failure = std::move(pick);
+    }
+    return failure;
 }
 
 void yt::reportPlay(const string& videoId) {

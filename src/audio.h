@@ -2,21 +2,24 @@
 #pragma once
 #include "core.h"
 
-enum class AudioEvent { Ready, Playing, Paused, Ended, Failed };
+enum class AudioEvent { Ready, Playing, Paused, Ended, Failed, DownloadFailed, Unavailable };
 
 namespace audio {
 // [notify] gets [message] with wParam = AudioEvent, lParam = the song's token.
 bool start(HWND notify, UINT message);
 void stop();
 
-// Opens a song: [url] is downloaded (in pieces, into the cache as [videoId].m4a) while it plays.
-void open(const string& videoId, const string& url, const string& userAgent, long long length, LPARAM token);
+// Opens a song once the download has been checked and saved to the cache.
+void open(const string& videoId, const string& url, const string& userAgent, long long length, LPARAM token, double expectedDuration);
 void close();
+void discard();
 void play();
 void pause();
 void seek(double seconds);
 double position();
 double duration();
+bool finished();
+void observePlayback();
 bool paused();
 void setVolume(double volume);    // 0..1
 void setRate(double rate);

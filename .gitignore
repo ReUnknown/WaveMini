@@ -25,6 +25,7 @@ Release/
 CMakeUserPresets.json
 CMakeCache.txt
 CMakeFiles/
+packages/
 
 # Editors and OS
 .vscode/

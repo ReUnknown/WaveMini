@@ -128,6 +128,35 @@ void startSignIn() {
     });
 }
 
+void verifyPlayback() {
+    const Item* song = app.current();
+    if (!song || !app.needsVerification || app.signingIn) return;
+    app.signingIn = true;
+    if (app.tucked) windowTuck(false);
+    invalidate();
+    const int generation = app.generation;
+    RECT over = {(LONG)posX, (LONG)posY, (LONG)posX + pixelW, (LONG)posY + pixelH};
+    signin::open(window, over, [generation](bool ok, Session session) {
+        app.signingIn = false;
+        invalidate();
+        if (generation != app.generation) return;
+        if (!ok) {
+            showToast("You can finish on YouTube in your browser");
+            return;
+        }
+        signedIn(session);
+        playIndex(app.index, true);
+    }, song->id, app.session.signedIn());
+}
+
+void openSongInBrowser() {
+    const Item* song = app.current();
+    if (!song) return;
+    wstring url = W(yt::watchUrl(song->id));
+    if ((INT_PTR)ShellExecuteW(window, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL) <= 32)
+        showToast("Couldn't open YouTube in your browser");
+}
+
 // ---------------------------------------------------------------- Messages
 
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -408,6 +437,7 @@ static int renderCheck(const wstring& dir) {
 
     app.settings.tab = Tab::Library;
     savePicture(dir, L"06-library-guest");
+    app.session.guest = false;
     app.session.cookie = "SAPISID=fake";
     app.session.name = "Ayden";
     for (int i = 0; i < 3; i++) app.libraryLoaded[i] = true;

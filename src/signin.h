@@ -4,8 +4,9 @@
 #include "yt.h"
 
 namespace signin {
-// Opens Google's sign-in page in a window covering [over] (screen pixels).
-void open(HWND owner, RECT over, std::function<void(bool ok, Session session)> done);
+// With a video ID, opens the official song page for playback verification.
+void open(HWND owner, RECT over, std::function<void(bool ok, Session session)> done,
+          const string& videoId = "", bool requireAccount = false);
 void close();
 // Forgets Google's cookies kept by the sign-in window (after signing out).
 void forget();

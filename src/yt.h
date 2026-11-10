@@ -48,22 +48,26 @@ struct NextResult {
     int index = 0;
 };
 
+enum class AudioClient : unsigned { None = 0, Vision = 1, Vr = 2, Music = 4, Android = 8 };
+
 struct AudioPick {
     string url, userAgent, error;
     long long length = 0;
     double loudnessDb = 0;
-    bool hasLoudness = false;
+    bool hasLoudness = false, needsVerification = false;
+    AudioClient client = AudioClient::None;
 };
 
 struct Session {
     string cookie, visitorData, dataSyncId, authUser = "0", name, email, photo;
     bool guest = false;
-    bool signedIn() const { return !cookie.empty(); }
+    bool signedIn() const { return !guest && !cookie.empty(); }
 };
 
 enum class SearchFilter { All, Songs, Artists, Albums, Playlists };
 
 namespace yt {
+string watchUrl(const string& videoId);
 void useSession(const Session& s);
 Session session();
 // Reads YouTube Music's current client version and a visitor id. Safe to call again.
@@ -89,7 +93,10 @@ bool subscribe(const string& channelId, bool on);
 bool addToPlaylist(const string& playlistId, const string& videoId);
 
 // A playable audio link for a song. [saver] picks the smallest audio.
-AudioPick audio(const string& videoId, bool saver);
+AudioPick audio(const string& videoId, bool saver, bool retryVerified = false, unsigned rejected = 0);
+// Fetches the resolved AAC in verified segments. The sink receives media bytes only.
+bool pullAudio(const string& url, const string& agent, long long length,
+               const std::function<bool(const char*, size_t)>& sink, const std::atomic<bool>* cancel = nullptr);
 // Counts the play on your account (history, recommendations).
 void reportPlay(const string& videoId);
 }

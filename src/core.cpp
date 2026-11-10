@@ -288,6 +288,12 @@ HttpRes http(const char* method, const string& url, const Headers& headers, cons
             size = sizeof(length);
             if (WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, length, &size, WINHTTP_NO_HEADER_INDEX))
                 res.contentLength = _wtoi64(length);
+            if (status == 200 || status == 206) {
+                wchar_t range[128] = {};
+                size = sizeof(range);
+                if (WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_RANGE, WINHTTP_HEADER_NAME_BY_INDEX, range, &size, WINHTTP_NO_HEADER_INDEX))
+                    res.contentRange = U(range);
+            }
             char buffer[16384];
             for (;;) {
                 if (cancel && cancel->load()) { res.status = 0; break; }
