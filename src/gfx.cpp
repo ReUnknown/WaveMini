@@ -469,7 +469,9 @@ void gfx::trimImages(long long keepMs) {
 void gfx::clear() { rt->Clear(D2D1::ColorF(0, 0, 0, 0)); }
 
 void gfx::shadow(Rect r, float radius, float spread, float alpha) {
-    // Rings fading outward: a soft edge without any blurring.
+    // The shape itself (mostly hidden under the card), then rings fading outward: a soft
+    // edge without any blurring.
+    rt->FillRoundedRectangle(D2D1::RoundedRect(rf(r), radius, radius), paint(Color{0, 0, 0, alpha}));
     for (float i = 0.5f; i < spread; i += 1) {
         float fade = 1 - i / spread;
         Rect ring = r.inset(-i);
