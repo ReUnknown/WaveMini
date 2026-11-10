@@ -13,7 +13,7 @@ add_executable(WaveMini WIN32
 target_compile_definitions(WaveMini PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)
 target_link_libraries(WaveMini PRIVATE
     d2d1 dwrite windowscodecs winhttp bcrypt crypt32 shlwapi shell32 ole32 oleaut32 uuid
-    runtimeobject user32 gdi32 advapi32)
+    runtimeobject dwmapi user32 gdi32 advapi32)
 
 # Google sign-in runs on Edge WebView2 (part of Windows 11). Point WEBVIEW2_DIR at the unpacked
 # Microsoft.Web.WebView2 package; without it WaveMini builds with sign-in switched off.

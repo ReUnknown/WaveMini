@@ -33,10 +33,47 @@ Rect visible(Rect r) {
     return Rect{x1, y1, std::max(0.0f, x2 - x1), std::max(0.0f, y2 - y1)};
 }
 
-bool hover(Rect r) { return inputOn && mouseIn && !dragging && visible(r).has(mouseX, mouseY); }
+bool live = true;                    // false while drawing something that's only fading or morphing
+bool hover(Rect r) { return inputOn && live && mouseIn && !dragging && visible(r).has(mouseX, mouseY); }
+
+// ---------------------------------------------------------------- Motion
+
+float frameDt = 0;                   // seconds since the last frame
+bool animating = false;              // set while drawing: something hasn't come to rest
+struct Spring { float x, v; };
+std::map<int, Spring> springs;
+
+// The value under [key], springing toward [target] (the same spring as Wave's mini player:
+// quick, with a hint of overshoot). The first time it's simply there.
+float glide(int key, float target, float stiffness = 420, float damping = 0.82f) {
+    auto found = springs.find(key);
+    if (found == springs.end()) { springs[key] = Spring{target, 0}; return target; }
+    Spring& s = found->second;
+    float left = std::min(frameDt, 0.05f);
+    while (left > 0) {
+        float h = std::min(left, 0.006f);
+        s.v += (-stiffness * (s.x - target) - 2 * damping * sqrtf(stiffness) * s.v) * h;
+        s.x += s.v * h;
+        left -= h;
+    }
+    if (fabsf(s.x - target) < 0.004f && fabsf(s.v) < 0.05f) { s.x = target; s.v = 0; }
+    else animating = true;
+    return s.x;
+}
+
+// 0 -> 1 after [key] changes: what's new fades and slides in.
+struct Arrival { string key; float t = 1; };
+float arrive(Arrival& a, const string& key, float seconds = 0.24f) {
+    if (a.key != key) { a.key = key; a.t = 0; }
+    else if (a.t < 1) a.t = std::min(1.0f, a.t + frameDt / seconds);
+    if (a.t < 1) animating = true;
+    float left = 1 - a.t;
+    return 1 - left * left * left;
+}
+
 
 bool click(Rect r, std::function<void()> fn) {
-    if (!inputOn) return false;
+    if (!inputOn || !live) return false;
     Rect v = visible(r);
     if (v.w <= 0 || v.h <= 0) return false;
     hits.push_back({v, std::move(fn), nullptr});
@@ -44,7 +81,7 @@ bool click(Rect r, std::function<void()> fn) {
 }
 
 void dragArea(Rect r, std::function<void(float, float, bool)> fn) {
-    if (inputOn) hits.push_back({visible(r), nullptr, std::move(fn)});
+    if (inputOn && live) hits.push_back({visible(r), nullptr, std::move(fn)});
 }
 
 // Starts a scrolling list; returns the y its content starts at.
@@ -52,7 +89,7 @@ float beginScroll(Rect r, float& value) {
     gfx::pushClip(r);
     clipOn = true;
     clipRect = r;
-    if (inputOn) scrolls.push_back({r, &value, 0});
+    if (inputOn && live) scrolls.push_back({r, &value, 0});
     return r.y - value;
 }
 
@@ -61,7 +98,7 @@ void endScroll(Rect r, float& value, float contentEnd) {
     float max = std::max(0.0f, height - r.h);
     if (value > max) value = max;
     if (value < 0) value = 0;
-    if (inputOn && !scrolls.empty()) scrolls.back().max = max;
+    if (inputOn && live && !scrolls.empty()) scrolls.back().max = max;
     clipOn = false;
     gfx::popClip();
     // A thin bar while there's more than fits.
@@ -180,19 +217,35 @@ string playerArt() {
 
 void pickTheme() {
     // WaveMini's own blue until a cover says otherwise.
-    theme = Theme{hex(0xa8c7ff), hex(0x0a2a5c), hex(0x0a1120), hex(0x1d3266), hex(0x13224a), hex(0xcfe0ff)};
+    Theme want = Theme{hex(0xa8c7ff), hex(0x0a2a5c), hex(0x0a1120), hex(0x1d3266), hex(0x13224a), hex(0xcfe0ff)};
     Color c;
     string art = playerArt();
-    if (art.empty() || !gfx::imageColor(artAt(art, 360), c)) return;
-    float h, s, l;
-    toHsl(c, h, s, l);
-    float sat = s < 0.08f ? 0.06f : std::max(0.35f, std::min(0.62f, s * 1.25f));
-    theme.accent = fromHsl(h, sat, 0.73f);
-    theme.onAccent = fromHsl(h, sat * 0.85f, 0.15f);
-    theme.bg = fromHsl(h + 6, sat * 0.95f, 0.055f);
-    theme.glowA = fromHsl(h + 14, std::min(0.7f, sat * 1.05f), 0.29f);
-    theme.glowB = fromHsl(h - 10, std::min(0.75f, sat * 1.2f), 0.17f);
-    theme.soft = fromHsl(h, std::min(0.75f, sat * 1.2f), 0.84f);
+    if (!art.empty() && gfx::imageColor(artAt(art, 360), c)) {
+        float h, sat0, l;
+        toHsl(c, h, sat0, l);
+        float sat = sat0 < 0.08f ? 0.06f : std::max(0.35f, std::min(0.62f, sat0 * 1.25f));
+        want.accent = fromHsl(h, sat, 0.73f);
+        want.onAccent = fromHsl(h, sat * 0.85f, 0.15f);
+        want.bg = fromHsl(h + 6, sat * 0.95f, 0.055f);
+        want.glowA = fromHsl(h + 14, std::min(0.7f, sat * 1.05f), 0.29f);
+        want.glowB = fromHsl(h - 10, std::min(0.75f, sat * 1.2f), 0.17f);
+        want.soft = fromHsl(h, std::min(0.75f, sat * 1.2f), 0.84f);
+    }
+    static bool first = true;
+    if (first) { theme = want; first = false; return; }
+    float k = 1 - expf(-frameDt * 7);
+    auto step = [k](Color& from, Color to) {
+        float apart = fabsf(from.r - to.r) + fabsf(from.g - to.g) + fabsf(from.b - to.b);
+        if (apart < 0.006f) { from = to; return; }
+        from = mix(from, to, k);
+        animating = true;
+    };
+    step(theme.accent, want.accent);
+    step(theme.onAccent, want.onAccent);
+    step(theme.bg, want.bg);
+    step(theme.glowA, want.glowA);
+    step(theme.glowB, want.glowB);
+    step(theme.soft, want.soft);
 }
 
 void backdrop(float w, float h) {
@@ -279,7 +332,7 @@ void drawPlayer() {
         gfx::text(b, Rect{W_ - 16 - bw - 2, 64, bw + 2, 20}, 12, Regular, white(0.85f), AlignRight);
         Rect bar{left + aw + 10, 66, W_ - 16 - bw - 10 - (left + aw + 10), 16};
         float phase = app.playing ? (float)(nowMs() % 100000) / 1000.0f * -3.2f : 0;
-        gfx::wave(bar, length > 0 ? (float)(at / length) : 0, phase, app.playing ? 2.4f : 0.0f, theme.accent);
+        gfx::wave(bar, length > 0 ? (float)(at / length) : 0, phase, glide(60, app.playing ? 2.4f : 0.0f), theme.accent);
         if (length > 0 && !app.loading) dragArea(Rect{bar.x - 4, bar.y - 6, bar.w + 8, bar.h + 12}, [bar, length](float x, float, bool released) {
             double f = std::max(0.0f, std::min(1.0f, (x - bar.x) / bar.w));
             seekPreview = f;
@@ -315,11 +368,13 @@ void drawTabs() {
                               {Tab::Library, Icon::Library, "Library"}, {Tab::Account, Icon::Person, "Account"}};
     Tab active = app.settings.tab;
     const float gap = 4, total = W_ - 20 - gap * 4;
-    float unit = total / (active == Tab::None ? 5.0f : 6.4f), x = 10;
+    float weights[5], sum = 0;
+    for (int i = 0; i < 5; i++) { weights[i] = std::max(0.6f, glide(100 + i, entries[i].tab == active ? 2.4f : 1.0f)); sum += weights[i]; }
+    float x = 10;
     for (int i = 0; i < 5; i++) {
         const Entry& e = entries[i];
-        bool on = e.tab == active;
-        Rect r{x, PLAYER + 8, on ? unit * 2.4f : unit, 40};
+        float open = std::max(0.0f, std::min(1.0f, (weights[i] - 1) / 1.4f));   // 0 closed .. 1 open
+        Rect r{x, PLAYER + 8, total * weights[i] / sum, 40};
         Tab tab = e.tab;
         bool over = click(r, [tab] {
             app.settings.tab = app.settings.tab == tab ? Tab::None : tab;
@@ -328,9 +383,10 @@ void drawTabs() {
             if (app.settings.tab == Tab::Library) loadLibrary(app.libraryTab);
             saveState();
         });
-        gfx::fillCorners(r, on ? theme.accent : white(over ? 0.15f : 0.08f), i == 0 ? 12 : 4, i == 4 ? 12 : 4, i == 4 ? 12 : 4, i == 0 ? 12 : 4);
-        Color fg = on ? theme.onAccent : white();
-        float labelW = on ? gfx::textWidth(e.name, 14, Bold) + 8 : 0;
+        float lit = glide(110 + i, over ? 1.0f : 0.0f, 700, 1);
+        gfx::fillCorners(r, mix(white(0.08f + 0.07f * lit), theme.accent, open), i == 0 ? 12 : 4, i == 4 ? 12 : 4, i == 4 ? 12 : 4, i == 0 ? 12 : 4);
+        Color fg = mix(white(), theme.onAccent, open);
+        float fullLabel = gfx::textWidth(e.name, 14, Bold) + 8, labelW = fullLabel * open;
         float iconW = e.tab == Tab::Account ? 24 : 18;
         float at = r.x + (r.w - iconW - labelW) / 2;
         if (e.tab == Tab::Account) {
@@ -343,7 +399,11 @@ void drawTabs() {
                 else gfx::text(upper(app.session.name.substr(0, 1)), face, 12, Bold, hex(0x0d1640), AlignCenter);
             }
         } else gfx::icon(e.icon, Rect{at, r.y + 11, 18, 18}, fg);
-        if (on) gfx::text(e.name, Rect{at + iconW + 8, r.y, labelW, 40}, 14, Bold, fg);
+        if (open > 0.03f) {
+            gfx::pushClip(Rect{at + iconW, r.y, labelW + 2, 40});
+            gfx::text(e.name, Rect{at + iconW + 8, r.y, fullLabel, 40}, 14, Bold, fg.alpha(open));
+            gfx::popClip();
+        }
         x += r.w + gap;
     }
 }
@@ -420,7 +480,7 @@ void drawLyrics() {
         // The list follows the song; the wheel doesn't fight it.
         clipOn = false;
         gfx::popClip();
-        if (inputOn && !scrolls.empty()) scrolls.pop_back();
+        if (inputOn && live && !scrolls.empty()) scrolls.pop_back();
     } else endScroll(area, app.lyricsScroll, end);
     gfx::popFade();
 }
@@ -615,14 +675,132 @@ bool drawPages(std::vector<Page>& stack) {
 
 // ---------------------------------------------------------------- Search
 
+// One row of the home page: cards you can page through sideways.
+void homeRow(int s, float& y, Rect area) {
+    const Section& section = app.home[s];
+    const float tile = 104, step = 114;
+    int count = std::min((int)section.items.size(), 14);
+    bool allSongs = true;
+    for (int i = 0; i < count; i++) if (section.items[i].kind != Kind::Song) allSongs = false;
+    float room = W_ - 32, most = std::max(0.0f, count * step - 10 - room);
+    if (y + 190 < area.y || y > area.bottom()) { y += 190; return; }
+
+    gfx::text(section.title, Rect{16, y, W_ - 32 - 104, 28}, 15, Bold, white());
+    float bx = W_ - 16 - 26;
+    if (most > 0) {
+        bool canRight = app.homeX[s] < most - 1, canLeft = app.homeX[s] > 1;
+        iconButton(Rect{bx, y + 1, 26, 26}, Icon::Chevron, 14, white(0.08f), white(canRight ? 0.95f : 0.3f), 8, [s, most, step] { app.homeX[s] = std::min(most, app.homeX[s] + step * 3); });
+        bx -= 30;
+        iconButton(Rect{bx, y + 1, 26, 26}, Icon::Back, 14, white(0.08f), white(canLeft ? 0.95f : 0.3f), 8, [s, step] { app.homeX[s] = std::max(0.0f, app.homeX[s] - step * 3); });
+        bx -= 30;
+    }
+    if (allSongs && count > 1) iconButton(Rect{bx, y + 1, 26, 26}, Icon::Play, 12, theme.accent, theme.onAccent, 13, [s] {
+        if (s >= (int)app.home.size()) return;
+        app.last = app.home[s].items[0];
+        app.hasLast = true;
+        playSongs(app.home[s].items, 0, app.home[s].title);
+    });
+    y += 34;
+
+    Rect strip{0, y, W_, tile + 42};
+    Rect before = clipRect;
+    gfx::pushClip(strip);
+    clipRect = Rect{0, std::max(strip.y, area.y), W_, std::max(0.0f, std::min(strip.bottom(), area.bottom()) - std::max(strip.y, area.y))};
+    float x = 16 - glide(2000 + s, app.homeX[s]);
+    for (int i = 0; i < count; i++, x += step) {
+        if (x + tile < 0 || x > W_) continue;
+        const Item& item = section.items[i];
+        Rect card{x, y, tile, tile + 40};
+        bool over = click(card, [s, i, allSongs] {
+            if (s >= (int)app.home.size() || i >= (int)app.home[s].items.size()) return;
+            Item copy = app.home[s].items[i];
+            if (copy.kind == Kind::Song && allSongs) {
+                app.last = copy;
+                app.hasLast = true;
+                playSongs(app.home[s].items, i, app.home[s].title);
+            } else openItem(app.searchPages, copy);
+        });
+        float radius = item.kind == Kind::Artist ? tile / 2 : 10;
+        cover(item.art, Rect{x, y, tile, tile}, radius, 240);
+        if (over) gfx::fill(Rect{x, y, tile, tile}, white(0.12f), radius);
+        if (app.current() && app.current()->id == item.id) gfx::outline(Rect{x, y, tile, tile}, theme.accent, radius, 2.5f);
+        gfx::text(item.title, Rect{x, y + tile + 5, tile, 18}, 13, Bold, white());
+        string sub = item.kind == Kind::Song ? item.artistText() : item.kind == Kind::Album ? item.artistText() : item.kind == Kind::Artist ? "Artist" : item.note;
+        gfx::text(sub, Rect{x, y + tile + 22, tile, 16}, 12, Regular, white(0.65f));
+    }
+    clipRect = before;
+    gfx::popClip();
+    y += tile + 42 + 14;
+}
+
+void drawHome(Rect area) {
+    if (!app.homeLoaded) {
+        loadHome();
+        centered("Loading your music...", "", area.y, area.h);
+        return;
+    }
+    if (app.home.empty()) {
+        centered("Couldn't load home", "Check your connection, then search for something.", area.y, area.h - 50);
+        float w = gfx::textWidth("Try again", 13, Bold) + 28;
+        pill((W_ - w) / 2, area.y + area.h / 2 + 30, 34, "Try again", -1, false, 13, 14, 10, [] { app.homeLoaded = false; });
+        return;
+    }
+    if (app.homeX.size() < app.home.size()) app.homeX.resize(app.home.size(), 0);
+    float y = beginScroll(area, app.homeScroll) + 4;
+    // Just clicked into the search box: what you searched lately.
+    if (app.searchFocus && !app.recent.empty()) {
+        float cx = 12;
+        for (auto& recent : app.recent) {
+            float w = gfx::textWidth(recent, 13, Semi) + 24;
+            if (cx + w > W_ - 12) break;
+            string q = recent;
+            cx += chip(cx, y, recent, false, [q] { app.query = W(q); runSearch(); }) + 6;
+        }
+        y += 40;
+    }
+    for (int s = 0; s < (int)app.home.size(); s++) homeRow(s, y, area);
+    if (app.homeLoading) { gfx::text("Loading more...", Rect{0, y, W_, 30}, 13, Semi, white(0.65f), AlignCenter); y += 40; }
+    else if (!app.homeMore.empty() && y - area.bottom() < 240) loadHome(true);
+    endScroll(area, app.homeScroll, y);
+}
+
+void drawSuggestions(Rect area) {
+    float y = area.y + 2;
+    int shown = 0;
+    for (auto& query : app.suggestQueries) {
+        if (y + 40 > area.bottom() || shown >= 4) break;
+        Rect r{10, y, W_ - 20, 40};
+        string q = query;
+        bool over = click(r, [q] { app.query = W(q); runSearch(); });
+        if (over) gfx::fill(r, white(0.07f), 10);
+        gfx::icon(Icon::Search, Rect{22, y + 11, 18, 18}, white(0.7f));
+        gfx::text(query, Rect{52, y, W_ - 52 - 20, 40}, 14, Semi, white());
+        y += 40;
+        shown++;
+    }
+    for (int i = 0; i < (int)app.suggestItems.size(); i++) {
+        if (y + 52 > area.bottom()) break;
+        const Item& item = app.suggestItems[i];
+        itemRow(Rect{10, y + 1, W_ - 20, 50}, item, item.subtitle(true), "", false, [i] {
+            if (i >= (int)app.suggestItems.size()) return;
+            Item copy = app.suggestItems[i];
+            openItem(app.searchPages, copy);
+        });
+        y += 52;
+        shown++;
+    }
+    if (shown == 0) centered("Press Enter to search", "", area.y, area.h);
+}
+
 void drawSearch() {
     if (drawPages(app.searchPages)) return;
     Rect field{10, TOP, W_ - 20, 42};
     click(field, [] { app.searchFocus = true; });
     gfx::fill(field, white(0.1f), 12);
-    if (app.searchFocus) gfx::outline(field, theme.accent, 12, 2);
+    float focus = glide(70, app.searchFocus ? 1.0f : 0.0f, 600, 1);
+    if (focus > 0.02f) gfx::outline(field, theme.accent.alpha(focus), 12, 2);
     gfx::icon(Icon::Search, Rect{22, TOP + 12, 18, 18}, white(0.8f));
-    string query = U(app.query);
+    string query = U(app.query), typed = trim(query);
     Rect textRect{50, TOP, W_ - 50 - 50, 42};
     if (query.empty()) gfx::text("Songs, artists, albums", textRect, 14, Regular, white(0.6f));
     else gfx::text(query, textRect, 14, Semi, white());
@@ -638,62 +816,62 @@ void drawSearch() {
         app.searchFocus = true;
     });
 
-    const char* names[5] = {"All", "Songs", "Artists", "Albums", "Playlists"};
-    const SearchFilter filters[5] = {SearchFilter::All, SearchFilter::Songs, SearchFilter::Artists, SearchFilter::Albums, SearchFilter::Playlists};
-    float x = 10;
-    for (int i = 0; i < 5; i++) {
-        SearchFilter f = filters[i];
-        x += chip(x, TOP + 50, names[i], app.filter == f, [f] { if (app.filter != f) { app.filter = f; runSearch(); } }) + 6;
-    }
-
-    Rect area{0, TOP + 88, W_, PANEL - 96};
-    if (app.searching) { centered("Searching...", "", area.y, area.h); return; }
-    if (app.results.empty()) {
-        if (!app.searched.empty()) { centered("Nothing found", "Try other words.", area.y, area.h); return; }
-        if (app.recent.empty()) { centered("Search YouTube Music", "Type a song, an artist or an album, then press Enter.", area.y, area.h); return; }
-        gfx::text("RECENT", Rect{16, area.y + 2, 200, 20}, 12, Bold, white(0.65f), AlignLeft, false, false, 0.8f);
-        float cx = 12, cy = area.y + 28;
-        for (auto& recent : app.recent) {
-            float w = gfx::textWidth(recent, 13, Semi) + 24;
-            if (cx + w > W_ - 12) { cx = 12; cy += 36; }
-            string q = recent;
-            cx += chip(cx, cy, recent, false, [q] { app.query = W(q); runSearch(); }) + 6;
+    // Nothing typed: home. Typing: suggestions. Searched: results.
+    static Arrival arrival;
+    int mode = typed.empty() ? 0 : (app.searchFocus && typed != app.searched) ? 1 : 2;
+    float in = arrive(arrival, std::to_string(mode));
+    Rect below{0, TOP + 48, W_, PANEL - 56};
+    if (in < 1) { gfx::pushOpacity(below, in); gfx::pushTransform(1, 0, (1 - in) * 10); }
+    if (mode == 0) drawHome(Rect{0, TOP + 50, W_, PANEL - 58});
+    else if (mode == 1) drawSuggestions(Rect{0, TOP + 50, W_, PANEL - 58});
+    else {
+        const char* names[5] = {"All", "Songs", "Artists", "Albums", "Playlists"};
+        const SearchFilter filters[5] = {SearchFilter::All, SearchFilter::Songs, SearchFilter::Artists, SearchFilter::Albums, SearchFilter::Playlists};
+        float x = 10;
+        for (int i = 0; i < 5; i++) {
+            SearchFilter f = filters[i];
+            x += chip(x, TOP + 50, names[i], app.filter == f, [f] { if (app.filter != f) { app.filter = f; runSearch(); } }) + 6;
         }
-        return;
-    }
-    float y = beginScroll(area, app.searchScroll);
-    for (int s = 0; s < (int)app.results.size(); s++) {
-        const Section& section = app.results[s];
-        bool top = section.title == "Top result";
-        if (!top && app.filter == SearchFilter::All) {
-            gfx::text(upper(section.title), Rect{16, y + 6, 300, 20}, 12, Bold, white(0.65f), AlignLeft, false, false, 0.8f);
-            y += 30;
-        }
-        for (int i = 0; i < (int)section.items.size(); i++) {
-            const Item& item = section.items[i];
-            bool card = top && i == 0 && item.kind != Kind::Song;
-            float h = card ? 70.0f : 52.0f;
-            if (y + h >= area.y && y <= area.bottom()) {
-                auto open = [s, i] {
-                    if (s >= (int)app.results.size() || i >= (int)app.results[s].items.size()) return;
-                    Item copy = app.results[s].items[i];
-                    app.searchFocus = false;
-                    openItem(app.searchPages, copy);
-                };
-                if (card) {
-                    Rect r{10, y, W_ - 20, 64};
-                    bool over = click(r, open);
-                    gfx::fill(r, white(over ? 0.12f : 0.07f), 12);
-                    cover(item.art, Rect{20, y + 10, 44, 44}, item.kind == Kind::Artist ? 22 : 6, 120);
-                    gfx::text(item.title, Rect{76, y + 11, W_ - 76 - 50, 22}, 15, Bold, white());
-                    gfx::text(item.subtitle(true), Rect{76, y + 33, W_ - 76 - 50, 18}, 12.5f, Regular, white(0.7f));
-                    gfx::icon(Icon::Chevron, Rect{W_ - 10 - 30, y + 23, 18, 18}, white(0.7f));
-                } else itemRow(Rect{10, y + 1, W_ - 20, 50}, item, item.subtitle(true), "", app.current() && app.current()->id == item.id, open);
+        Rect area{0, TOP + 88, W_, PANEL - 96};
+        if (app.searching) centered("Searching...", "", area.y, area.h);
+        else if (app.results.empty()) centered("Nothing found", "Try other words.", area.y, area.h);
+        else {
+            float y = beginScroll(area, app.searchScroll);
+            for (int s = 0; s < (int)app.results.size(); s++) {
+                const Section& section = app.results[s];
+                bool top = section.title == "Top result";
+                if (!top && app.filter == SearchFilter::All) {
+                    gfx::text(upper(section.title), Rect{16, y + 6, 300, 20}, 12, Bold, white(0.65f), AlignLeft, false, false, 0.8f);
+                    y += 30;
+                }
+                for (int i = 0; i < (int)section.items.size(); i++) {
+                    const Item& item = section.items[i];
+                    bool card = top && i == 0 && item.kind != Kind::Song;
+                    float h = card ? 70.0f : 52.0f;
+                    if (y + h >= area.y && y <= area.bottom()) {
+                        auto open = [s, i] {
+                            if (s >= (int)app.results.size() || i >= (int)app.results[s].items.size()) return;
+                            Item copy = app.results[s].items[i];
+                            app.searchFocus = false;
+                            openItem(app.searchPages, copy);
+                        };
+                        if (card) {
+                            Rect r{10, y, W_ - 20, 64};
+                            bool over = click(r, open);
+                            gfx::fill(r, white(over ? 0.12f : 0.07f), 12);
+                            cover(item.art, Rect{20, y + 10, 44, 44}, item.kind == Kind::Artist ? 22 : 6, 120);
+                            gfx::text(item.title, Rect{76, y + 11, W_ - 76 - 50, 22}, 15, Bold, white());
+                            gfx::text(item.subtitle(true), Rect{76, y + 33, W_ - 76 - 50, 18}, 12.5f, Regular, white(0.7f));
+                            gfx::icon(Icon::Chevron, Rect{W_ - 10 - 30, y + 23, 18, 18}, white(0.7f));
+                        } else itemRow(Rect{10, y + 1, W_ - 20, 50}, item, item.subtitle(true), "", app.current() && app.current()->id == item.id, open);
+                    }
+                    y += h;
+                }
             }
-            y += h;
+            endScroll(area, app.searchScroll, y + 6);
         }
     }
-    endScroll(area, app.searchScroll, y + 6);
+    if (in < 1) { gfx::popTransform(); gfx::popOpacity(); }
 }
 
 // ---------------------------------------------------------------- Library
@@ -965,54 +1143,114 @@ void drawToast(float h) {
 
 // ---------------------------------------------------------------- Drawing and input
 
-Size2 wantedSize() {
-    if (app.tucked) return Size2{56, 56};
+static Size2 fullSize() {
     if (!app.hasSession) return Size2{W_, PLAYER + TABS + PANEL};
     if (app.settings.tab == Tab::None) return Size2{W_, PLAYER + TABS};
     return Size2{W_, PLAYER + TABS + PANEL};
 }
 
-void draw(float w, float h) {
+Size2 wantedSize() {
+    if (app.tucked) return Size2{56, 56};
+    return fullSize();
+}
+
+void uiFrame(float seconds) { frameDt = seconds; }
+bool uiAnimating() { return animating; }
+
+static void drawPanel(Tab tab) {
+    switch (tab) {
+        case Tab::UpNext: drawUpNext(); break;
+        case Tab::Lyrics: drawLyrics(); break;
+        case Tab::Search: drawSearch(); break;
+        case Tab::Library: drawLibrary(); break;
+        case Tab::Account: drawAccount(); break;
+        default: break;
+    }
+}
+
+// The card at its full layout; [shownH] is how much of it the window shows right now.
+static void drawCard(float w, float h, float shownH, bool usable) {
+    if (!app.hasSession) { live = usable; drawSignIn(w, h); return; }
+    backdrop(w, PLAYER + TABS + PANEL);
+    // Under an open menu nothing takes clicks.
+    inputOn = !app.menuOpen;
+    live = usable;
+    drawPlayer();
+    drawTabs();
+    if (shownH > PLAYER + TABS + 1) {
+        // While the panel folds away it's still the one that was open.
+        static Tab shownTab = Tab::UpNext;
+        bool folding = app.settings.tab == Tab::None;
+        if (!folding) shownTab = app.settings.tab;
+        const std::vector<Page>* pages = shownTab == Tab::Search ? &app.searchPages : shownTab == Tab::Library ? &app.libraryPages : nullptr;
+        string key = std::to_string((int)shownTab) + ":" + (pages && !pages->empty() ? std::to_string(pages->size()) + pages->back().id : "");
+        static Arrival arrival;
+        float in = arrive(arrival, key);
+        Rect panel{0, TOP, w, PANEL};
+        gfx::pushClip(panel);
+        if (in < 1) { gfx::pushOpacity(panel, in); gfx::pushTransform(1, 0, (1 - in) * 12); }
+        live = usable && !folding;
+        drawPanel(shownTab);
+        live = usable;
+        if (in < 1) { gfx::popTransform(); gfx::popOpacity(); }
+        gfx::popClip();
+    }
+    float menu = glide(50, app.menuOpen ? 1.0f : 0.0f, 520, 1);
+    if (menu > 0.01f && app.current()) {
+        inputOn = true;
+        live = usable && app.menuOpen;
+        gfx::pushOpacity(Rect{0, 0, w, h}, std::min(1.0f, menu));
+        gfx::pushTransform(1, 0, (1 - menu) * -10);
+        drawMenu(w, h);
+        gfx::popTransform();
+        gfx::popOpacity();
+        live = usable;
+        // The menu's own button stays live on top of the scrim.
+        if (app.menuOpen) windowButtons(true, Color{0, 0, 0, 0.22f});
+    }
+    inputOn = true;
+    float toast = glide(51, app.toast.empty() ? 0.0f : 1.0f, 520, 1);
+    if (toast > 0.01f && !app.toast.empty()) {
+        gfx::pushOpacity(Rect{0, h - 70, w, 70}, std::min(1.0f, toast));
+        gfx::pushTransform(1, 0, (1 - toast) * 10);
+        drawToast(h);
+        gfx::popTransform();
+        gfx::popOpacity();
+    }
+}
+
+void draw(float w, float h, float shownW, float shownH) {
     hits.clear();
     scrolls.clear();
     clipOn = false;
     inputOn = true;
+    live = true;
+    animating = false;
     pickTheme();
-    if (app.tucked) {
-        gfx::pushClip(Rect{0, 0, w, h}, 28);
+    Size2 full = fullSize();
+    // How far along the card is between its full shape (0) and the tucked button (1).
+    float tuck = std::max(0.0f, std::min(1.0f, (full.w - shownW) / (full.w - 56)));
+    float radius = 14 + (std::min(shownW, shownH) / 2 - 14) * tuck * tuck;
+    Rect all{0, 0, shownW, shownH};
+    gfx::pushClip(all, radius);
+    if (tuck < 0.995f) {
+        bool fading = tuck > 0.004f;
+        if (fading) gfx::pushOpacity(all, 1 - tuck);
+        drawCard(full.w, full.h, shownH, !app.tucked && tuck < 0.03f);
+        if (fading) gfx::popOpacity();
+    }
+    if (tuck > 0.004f) {
+        live = false;
+        float size = std::min(shownW, shownH);
+        gfx::pushOpacity(all, tuck);
+        gfx::pushTransform(size / 56, (shownW - size) / 2, (shownH - size) / 2);
         drawTucked();
-        gfx::popClip();
-        return;
-    }
-    gfx::pushClip(Rect{0, 0, w, h}, 14);
-    if (!app.hasSession) {
-        drawSignIn(w, h);
-    } else {
-        backdrop(w, h);
-        // Under an open menu nothing takes clicks.
-        inputOn = !app.menuOpen;
-        drawPlayer();
-        drawTabs();
-        if (h > PLAYER + TABS + 1) {
-            switch (app.settings.tab) {
-                case Tab::UpNext: drawUpNext(); break;
-                case Tab::Lyrics: drawLyrics(); break;
-                case Tab::Search: drawSearch(); break;
-                case Tab::Library: drawLibrary(); break;
-                case Tab::Account: drawAccount(); break;
-                default: break;
-            }
-        }
-        if (app.menuOpen) {
-            inputOn = true;
-            drawMenu(w, h);
-            // The menu's own button stays live on top of the scrim.
-            windowButtons(true, Color{0, 0, 0, 0.22f});
-        }
-        drawToast(h);
-    }
-    gfx::outline(Rect{0, 0, w, h}, white(0.08f), 14, 1);
+        gfx::popTransform();
+        gfx::popOpacity();
+    } else gfx::outline(all, white(0.08f), radius, 1);
+    live = true;
     gfx::popClip();
+    frameDt = 0;
 }
 
 static Hit* hitAt(float x, float y) {
@@ -1083,10 +1321,11 @@ void uiWheel(float x, float y, float delta) {
 bool uiChar(wchar_t c) {
     if (!app.searchFocus || app.settings.tab != Tab::Search || !app.searchPages.empty()) return false;
     if (c == L'\r') { runSearch(); return true; }
-    if (c == 8) { if (!app.query.empty()) app.query.pop_back(); invalidate(); return true; }
+    if (c == 8) { if (!app.query.empty()) app.query.pop_back(); app.suggestDue = nowMs() + 170; invalidate(); return true; }
     if (c == 27) { app.searchFocus = false; invalidate(); return true; }
     if (c < 32) return false;
     if (app.query.size() < 200) app.query.push_back(c);
+    app.suggestDue = nowMs() + 170;
     invalidate();
     return true;
 }

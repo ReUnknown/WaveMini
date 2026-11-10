@@ -70,6 +70,19 @@ struct App {
     float searchScroll = 0;
     std::vector<Page> searchPages;
 
+    // Home (shown in the Search tab until you type).
+    std::vector<Section> home;
+    std::vector<float> homeX;      // how far each row is scrolled sideways
+    string homeMore;
+    bool homeLoaded = false, homeLoading = false;
+    float homeScroll = 0;
+
+    // Suggestions while typing.
+    std::vector<string> suggestQueries;
+    std::vector<Item> suggestItems;
+    string suggestFor;
+    long long suggestDue = 0;
+
     // Library.
     int libraryTab = 0;            // 0 playlists, 1 albums, 2 artists
     std::vector<Item> library[3];
@@ -124,6 +137,8 @@ void onAudio(AudioEvent event, LPARAM token);
 void tick();                        // a few times a second while the window is alive
 void loadLyrics();
 void runSearch();
+void loadHome(bool more = false);
+void loadSuggestions();
 void loadLibrary(int which, bool force = false);
 void openPage(std::vector<Page>& stack, Page::Type type, const string& id, const string& title, const string& params = "");
 void openItem(std::vector<Page>& stack, const Item& item);
@@ -136,7 +151,11 @@ void copyText(const string& text);
 
 struct Size2 { float w, h; };
 Size2 wantedSize();
-void draw(float w, float h);
+// Draws the interface laid out at [w] x [h] into a window currently [shownW] x [shownH]
+// (they differ while the window is changing shape).
+void draw(float w, float h, float shownW, float shownH);
+void uiFrame(float seconds);      // time since the last frame, for what's moving
+bool uiAnimating();               // something is still moving: draw again next frame
 void uiMouseDown(float x, float y);
 void uiMouseMove(float x, float y);
 void uiMouseUp(float x, float y);

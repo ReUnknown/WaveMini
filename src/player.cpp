@@ -127,6 +127,10 @@ void signedIn(const Session& s) {
     yt::useSession(s);
     saveSession();
     for (int i = 0; i < 3; i++) { app.library[i].clear(); app.libraryLoaded[i] = app.libraryLoading[i] = false; }
+    app.home.clear();
+    app.homeMore.clear();
+    app.homeLoaded = false;
+    app.homeScroll = 0;
     refreshAccount();
     invalidate();
 }
@@ -147,6 +151,10 @@ void signOut() {
     app.liked.clear();
     saveLikes();
     for (int i = 0; i < 3; i++) { app.library[i].clear(); app.libraryLoaded[i] = app.libraryLoading[i] = false; }
+    app.home.clear();
+    app.homeMore.clear();
+    app.homeLoaded = false;
+    app.homeScroll = 0;
     app.searchPages.clear();
     app.libraryPages.clear();
     app.menuOpen = false;
@@ -473,6 +481,7 @@ void tick() {
         audio::pause();
         invalidate();
     }
+    if (app.suggestDue && now >= app.suggestDue) loadSuggestions();
     if (app.toastUntil && now >= app.toastUntil) { app.toastUntil = 0; app.toast.clear(); invalidate(); }
     // Continue only if a real end-of-track event requested another radio page.
     if (waitingForNext && app.current() && app.wantPlay && app.error.empty()) {
@@ -600,6 +609,38 @@ void runSearch() {
         invalidate();
     });
     invalidate();
+}
+
+void loadHome(bool more) {
+    if (app.homeLoading || (!more && app.homeLoaded) || (more && app.homeMore.empty())) return;
+    app.homeLoading = true;
+    string from = more ? app.homeMore : string();
+    async<std::pair<std::vector<Section>, string>>([from] {
+        string next = from;
+        auto sections = yt::home(next);
+        return std::make_pair(sections, next);
+    }, [more](std::pair<std::vector<Section>, string> got) {
+        app.homeLoading = false;
+        app.homeLoaded = true;
+        if (!more) app.home.clear();
+        for (auto& section : got.first) app.home.push_back(section);
+        app.homeMore = got.second;
+        app.homeX.resize(app.home.size(), 0);
+        invalidate();
+    });
+}
+
+void loadSuggestions() {
+    string input = trim(U(app.query));
+    app.suggestDue = 0;
+    if (input.empty() || input == app.suggestFor) return;
+    app.suggestFor = input;
+    async<yt::Suggestions>([input] { return yt::suggest(input); }, [input](yt::Suggestions got) {
+        if (app.suggestFor != input) return;
+        app.suggestQueries = std::move(got.queries);
+        app.suggestItems = std::move(got.items);
+        invalidate();
+    });
 }
 
 void loadLibrary(int which, bool force) {

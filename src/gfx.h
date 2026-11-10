@@ -68,6 +68,9 @@ void popClip();
 // Everything drawn until popFade fades out over [top] and [bottom] units at the rect's edges.
 void pushFade(Rect r, float top, float bottom);
 void popFade();
+// Everything drawn until popTransform is scaled by [scale], then moved by ([dx], [dy]).
+void pushTransform(float scale, float dx, float dy);
+void popTransform();
 void pushOpacity(Rect r, float opacity);
 void popOpacity();
 

@@ -74,6 +74,10 @@ Session session();
 void warmUp();
 
 std::vector<Section> search(const string& query, SearchFilter filter);
+// YouTube Music's home feed. [continuation] in: where to carry on from ("" = the start); out: the next one.
+std::vector<Section> home(string& continuation);
+struct Suggestions { std::vector<string> queries; std::vector<Item> items; };
+Suggestions suggest(const string& input);
 ListPage album(const string& browseId);
 ListPage playlist(const string& playlistId);
 std::vector<Item> playlistMore(string& continuation);

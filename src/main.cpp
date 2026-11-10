@@ -5,6 +5,7 @@
 #include "signin.h"
 #include <shellapi.h>
 #include <windowsx.h>
+#include <dwmapi.h>
 
 #define WM_UICALL (WM_APP + 1)
 #define WM_AUDIO (WM_APP + 2)
@@ -24,6 +25,9 @@ static bool windowDrag, dragMoved, trackingMouse;
 static POINT dragCursor;
 static float dragX, dragY;
 static UINT timerMs;
+// The window's shape springs between sizes (unfolding, tucking) instead of jumping.
+static float shownW, shownH, goalW, goalH, velX, velY, velW, velH;
+static int bufferW, bufferH;
 
 void invalidate() { dirty = true; }
 
@@ -60,28 +64,43 @@ static void retime() {
 
 static void render() {
     Size2 want = wantedSize();
-    int w = (int)lroundf(want.w * scale), h = (int)lroundf(want.h * scale);
-    if (w != pixelW || h != pixelH || !bitmap) {
+    float wantW = want.w * scale, wantH = want.h * scale;
+    if (wantW != goalW || wantH != goalH) {
+        goalW = wantW;
+        goalH = wantH;
+        if (!placed) {
+            shownW = goalW;
+            shownH = goalH;
+            pixelW = (int)goalW;
+            pixelH = (int)goalH;
+        }
+        // A new size keeps its corner (or its spot on the edge).
+        home((int)lroundf(goalW), (int)lroundf(goalH), targetX, targetY);
+        if (!placed) { posX = targetX; posY = targetY; }
+        else moving = true;
+        placed = true;
+    }
+    int w = std::max(1, (int)lroundf(shownW)), h = std::max(1, (int)lroundf(shownH));
+    if (w > bufferW || h > bufferH || !bitmap) {
+        // Only ever grows, so a changing shape doesn't mean a new bitmap every frame.
+        bufferW = std::max(bufferW, w);
+        bufferH = std::max(bufferH, h);
         if (bitmap) DeleteObject(bitmap);
         BITMAPINFO info = {};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        info.bmiHeader.biWidth = w;
-        info.bmiHeader.biHeight = -h;
+        info.bmiHeader.biWidth = bufferW;
+        info.bmiHeader.biHeight = -bufferH;
         info.bmiHeader.biPlanes = 1;
         info.bmiHeader.biBitCount = 32;
         if (!memoryDc) memoryDc = CreateCompatibleDC(nullptr);
         bitmap = CreateDIBSection(memoryDc, &info, DIB_RGB_COLORS, &bitmapBits, nullptr, 0);
         SelectObject(memoryDc, bitmap);
-        pixelW = w;
-        pixelH = h;
-        // A new size keeps its corner (or its spot on the edge).
-        home(w, h, targetX, targetY);
-        if (!placed || !moving) { posX = targetX; posY = targetY; }
-        placed = true;
     }
+    pixelW = w;
+    pixelH = h;
     for (int attempt = 0; attempt < 2; attempt++) {
         if (!gfx::begin(memoryDc, w, h, scale)) return;
-        draw(want.w, want.h);
+        draw(want.w, want.h, w / scale, h / scale);
         if (gfx::end()) break;
     }
     POINT source = {0, 0}, place = {(LONG)lroundf(posX), (LONG)lroundf(posY)};
@@ -92,8 +111,31 @@ static void render() {
     retime();
 }
 
+// One frame of the window's own motion: the same spring for place and size, so the corner
+// it's anchored to stays put while the rest moves.
+static void stepWindow(float dt) {
+    auto spring = [dt](float& x, float& v, float target) {
+        const float stiffness = 420, damping = 0.82f;
+        float left = std::min(dt, 0.05f);
+        while (left > 0) {
+            float h = std::min(left, 0.006f);
+            v += (-stiffness * (x - target) - 2 * damping * sqrtf(stiffness) * v) * h;
+            x += v * h;
+            left -= h;
+        }
+        return fabsf(x - target) < 0.5f && fabsf(v) < 6;
+    };
+    bool a = spring(posX, velX, targetX), b = spring(posY, velY, targetY), c = spring(shownW, velW, goalW), d = spring(shownH, velH, goalH);
+    if (a && b && c && d) {
+        posX = targetX; posY = targetY; shownW = goalW; shownH = goalH;
+        velX = velY = velW = velH = 0;
+        moving = false;
+    }
+    dirty = true;
+}
+
 static void glideHome() {
-    home(pixelW, pixelH, targetX, targetY);
+    home((int)lroundf(goalW), (int)lroundf(goalH), targetX, targetY);
     moving = true;
     retime();
 }
@@ -105,7 +147,6 @@ void windowTuck(bool tuck) {
     }
     app.tucked = tuck;
     app.menuOpen = false;
-    moving = false;
     invalidate();
 }
 
@@ -165,12 +206,6 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_AUDIO: onAudio((AudioEvent)wparam, lparam); if (dirty) render(); return 0;
         case WM_TIMER: {
             tick();
-            if (moving) {
-                posX += (targetX - posX) * 0.3f;
-                posY += (targetY - posY) * 0.3f;
-                if (fabsf(targetX - posX) < 0.6f && fabsf(targetY - posY) < 0.6f) { posX = targetX; posY = targetY; moving = false; }
-                SetWindowPos(hwnd, nullptr, (int)lroundf(posX), (int)lroundf(posY), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            }
             bool lively = !app.tucked && (app.playing || app.loading || app.searchFocus);
             if (dirty || lively) render();
             else retime();
@@ -185,7 +220,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 GetCursorPos(&dragCursor);
                 dragX = posX;
                 dragY = posY;
-                moving = false;
+                velX = velY = 0;
             } else uiMouseDown(x, y);
             if (dirty) render();
             return 0;
@@ -315,7 +350,7 @@ static void savePicture(const wstring& dir, const wchar_t* name) {
     HGDIOBJ before = SelectObject(dc, picture);
     // Twice, with messages handled in between, so covers that were asked for have arrived.
     for (int pass = 0; pass < 2; pass++) {
-        if (gfx::begin(dc, w, h, s)) { draw(want.w, want.h); gfx::end(); }
+        if (gfx::begin(dc, w, h, s)) { draw(want.w, want.h, want.w, want.h); gfx::end(); }
         if (pass == 0) {
             long long until = nowMs() + 2500;
             MSG msg;
@@ -475,6 +510,25 @@ static int renderCheck(const wstring& dir) {
     app.hasLast = true;
     savePicture(dir, L"13-nothing-playing");
 
+    string more;
+    app.home = yt::home(more);
+    app.homeLoaded = true;
+    app.homeX.assign(app.home.size(), 0);
+    log += "home sections: " + std::to_string(app.home.size()) + "\r\n";
+    for (auto& section : app.home) log += "  " + section.title + ": " + std::to_string(section.items.size()) + "\r\n";
+    app.recent.clear();
+    savePicture(dir, L"15-home");
+
+    yt::Suggestions suggestions = yt::suggest("daft");
+    log += "suggestions: " + std::to_string(suggestions.queries.size()) + " searches, " + std::to_string(suggestions.items.size()) + " items\r\n";
+    app.suggestQueries = suggestions.queries;
+    app.suggestItems = suggestions.items;
+    app.query = L"daft";
+    app.searchFocus = true;
+    savePicture(dir, L"16-suggestions");
+    app.searchFocus = false;
+    app.query.clear();
+
     app.hasSession = false;
     savePicture(dir, L"14-sign-in");
 
@@ -533,10 +587,35 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ShowWindow(window, SW_SHOWNOACTIVATE);
     background([] { yt::warmUp(); });
 
+    // While anything is moving, one frame per screen refresh (whatever the monitor's rate);
+    // otherwise asleep until something happens.
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    LARGE_INTEGER frequency, last = {}, now;
+    QueryPerformanceFrequency(&frequency);
+    bool running = true, inMotion = false;
+    while (running) {
+        if (window && (moving || uiAnimating()) && !windowDrag) {
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                if (msg.message == WM_QUIT) { running = false; break; }
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            if (!running || !window) break;
+            QueryPerformanceCounter(&now);
+            float dt = inMotion ? (float)((double)(now.QuadPart - last.QuadPart) / (double)frequency.QuadPart) : 1 / 60.0f;
+            dt = std::max(0.001f, std::min(0.05f, dt));
+            last = now;
+            inMotion = true;
+            if (moving) stepWindow(dt);
+            uiFrame(dt);
+            render();
+            if (FAILED(DwmFlush())) Sleep(8);
+        } else {
+            inMotion = false;
+            if (GetMessageW(&msg, nullptr, 0, 0) <= 0) break;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
     CoUninitialize();
     return 0;

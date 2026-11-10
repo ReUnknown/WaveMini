@@ -611,6 +611,21 @@ void gfx::pushOpacity(Rect r, float opacity) {
 
 void gfx::popOpacity() { rt->PopLayer(); }
 
+static std::vector<D2D1_MATRIX_3X2_F> transforms;
+
+void gfx::pushTransform(float scale, float dx, float dy) {
+    D2D1_MATRIX_3X2_F before;
+    rt->GetTransform(&before);
+    transforms.push_back(before);
+    rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) * D2D1::Matrix3x2F::Translation(dx, dy) * before);
+}
+
+void gfx::popTransform() {
+    if (transforms.empty()) return;
+    rt->SetTransform(transforms.back());
+    transforms.pop_back();
+}
+
 void gfx::cached(const string& key, Rect r, const std::function<void()>& paintIt) {
     if (!cachedPicture || key != cachedKey) {
         drop(cachedPicture);

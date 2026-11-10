@@ -889,3 +889,38 @@ bool yt::subscribe(const string& channelId, bool on) {
 bool yt::addToPlaylist(const string& playlistId, const string& videoId) {
     return post("browse/edit_playlist", field("playlistId", playlistId) + ",\"actions\":[{\"action\":\"ACTION_ADD_VIDEO\"," + field("addedVideoId", videoId) + ",\"dedupeOption\":\"DEDUPE_OPTION_SKIP\"}]").has();
 }
+
+// ---------------------------------------------------------------- Home and suggestions
+
+std::vector<Section> yt::home(string& continuation) {
+    std::vector<Section> sections;
+    Json root;
+    const Json* list;
+    if (continuation.empty()) {
+        root = post("browse", field("browseId", "FEmusic_home"));
+        list = &root.at("contents", "singleColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "sectionListRenderer");
+    } else {
+        root = post("browse", "", "ctoken=" + urlEncode(continuation) + "&continuation=" + urlEncode(continuation) + "&type=next");
+        list = &root.at("continuationContents", "sectionListContinuation");
+    }
+    for (auto& node : (*list)["contents"].each()) {
+        Section section;
+        if (carousel(node, section)) sections.push_back(std::move(section));
+    }
+    continuation = list->at("continuations", 0, "nextContinuationData", "continuation").str();
+    return sections;
+}
+
+yt::Suggestions yt::suggest(const string& input) {
+    Suggestions out;
+    Json root = post("music/get_search_suggestions", field("input", input));
+    for (auto& section : root["contents"].each()) {
+        for (auto& entry : section.at("searchSuggestionsSectionRenderer", "contents").each()) {
+            string query = entry.at("searchSuggestionRenderer", "navigationEndpoint", "searchEndpoint", "query").str();
+            Item item;
+            if (!query.empty()) out.queries.push_back(query);
+            else if (parseItem(entry, item)) out.items.push_back(std::move(item));
+        }
+    }
+    return out;
+}
