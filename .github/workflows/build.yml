@@ -3,7 +3,11 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   windows:
@@ -29,10 +33,23 @@ jobs:
           if (Test-Path screens\render.txt) { Get-Content screens\render.txt }
           "{0:N0} bytes" -f (Get-Item build\Release\WaveMini.exe).Length
 
+      # The installer is the same program under another name: run as "Setup" it installs itself.
+      - name: Make the installer
+        run: Copy-Item build\Release\WaveMini.exe build\Release\WaveMini-Setup.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: WaveMini
-          path: build/Release/WaveMini.exe
+          path: |
+            build/Release/WaveMini.exe
+            build/Release/WaveMini-Setup.exe
+
+      # A version tag (v0.2.0) publishes a release: the updater reads WaveMini.exe from the latest one.
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" build/Release/WaveMini.exe build/Release/WaveMini-Setup.exe --title "WaveMini ${{ github.ref_name }}" --generate-notes
 
       - uses: actions/upload-artifact@v4
         if: always()

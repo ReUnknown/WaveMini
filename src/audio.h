@@ -12,6 +12,8 @@ void stop();
 // Opens a song once the download has been checked and saved to the cache.
 void open(const string& videoId, const string& url, const string& userAgent, long long length, LPARAM token, double expectedDuration);
 void close();
+// Downloads a song into the cache without playing it (the next one, just before it's due).
+void prefetch(const string& videoId, const string& url, const string& userAgent, long long length);
 void discard();
 void play();
 void pause();

@@ -329,6 +329,15 @@ void audio::open(const string& videoId, const string& url, const string& userAge
     });
 }
 
+void audio::prefetch(const string& videoId, const string& url, const string& userAgent, long long length) {
+    auto song = std::make_shared<Song>();
+    song->path = cacheDir() + L"\\" + W(videoId) + L".playable.m4a";
+    song->part = song->path + L".next.part";
+    song->total = length;
+    if (length <= 0 || matchesLength(song->path, length)) return;
+    background([song, url, userAgent] { download(*song, url, userAgent); });
+}
+
 void audio::play() {
     if (!voice) return;
     if (voice->atEnd) seek(0);

@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_executable(WaveMini WIN32
-    src/core.cpp src/yt.cpp src/audio.cpp src/mp4.cpp src/gfx.cpp src/player.cpp src/ui.cpp src/signin.cpp src/main.cpp
+    src/core.cpp src/yt.cpp src/audio.cpp src/mp4.cpp src/gfx.cpp src/player.cpp src/ui.cpp src/signin.cpp src/smtc.cpp src/install.cpp src/main.cpp
     res/app.rc)
 
 target_compile_definitions(WaveMini PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)

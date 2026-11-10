@@ -32,7 +32,12 @@ namespace gfx {
 bool start();
 // Draws into a 32-bit bitmap selected into [dc] ([pxW] x [pxH] pixels); coordinates are in
 // design units, [scale] pixels each.
-bool begin(HDC dc, int pxW, int pxH, float scale);
+// [clearAll] false keeps what's already in the bitmap (for redrawing just a part of it).
+bool begin(HDC dc, int pxW, int pxH, float scale, bool clearAll = true);
+// Wipes to see-through, inside the current clip.
+void clear();
+// A soft shadow around [r], reaching [spread] units out.
+void shadow(Rect r, float radius, float spread, float alpha);
 bool end();     // false: the target was lost and everything must be drawn again
 
 void fill(Rect r, Color c, float radius = 0);

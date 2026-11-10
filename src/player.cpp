@@ -1,5 +1,7 @@
 #include "app.h"
 #include "signin.h"
+#include "install.h"
+#include "smtc.h"
 #include <shellapi.h>
 
 App app;
@@ -198,19 +200,7 @@ void setStartWithWindows(bool on) {
     saveState();
 }
 
-void checkForUpdates() {
-    showToast("Checking for updates...");
-    async<Json>([] {
-        HttpRes res = http("GET", "https://api.github.com/repos/ReUnknown/WaveMini/releases/latest", {{"User-Agent", "WaveMini"}, {"Accept", "application/vnd.github+json"}});
-        return res.ok() ? Json::parse(res.body) : Json();
-    }, [](Json release) {
-        string tag = release["tag_name"].str();
-        if (tag.empty()) { showToast("Couldn't check for updates"); return; }
-        if (tag == "v" WAVEMINI_VERSION || tag == WAVEMINI_VERSION) { showToast("You have the latest version"); return; }
-        showToast("WaveMini " + tag + " is out");
-        ShellExecuteW(nullptr, L"open", W(release["html_url"].str()).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    });
-}
+void checkForUpdates() { install::checkForUpdate(true); }
 
 void applyVolume() {
     audio::setVolume(app.settings.volume * (app.settings.evenVolume ? app.loudnessGain : 1));
@@ -550,6 +540,21 @@ void onAudio(AudioEvent event, LPARAM token) {
 void tick() {
     audio::observePlayback();
     long long now = nowMs();
+    smtc::update(app.current(), app.playing || (app.loading && app.wantPlay));
+    // The next song's file, fetched in the last seconds of this one so the change is instant.
+    static string preloaded;
+    if (app.playing && app.index + 1 < (int)app.queue.size()) {
+        double length = audio::duration(), at = audio::position();
+        string next = app.queue[app.index + 1].id;
+        if (length > 45 && length - at < 25 && preloaded != next) {
+            preloaded = next;
+            bool saver = app.settings.saver;
+            background([next, saver] {
+                AudioPick pick = yt::audio(next, saver);
+                if (!pick.url.empty() && pick.length > 0 && !pick.needsVerification) audio::prefetch(next, pick.url, pick.userAgent, pick.length);
+            });
+        }
+    }
     if (app.sleepAt && now >= app.sleepAt) {
         app.sleepAt = 0;
         app.sleepMinutes = 0;

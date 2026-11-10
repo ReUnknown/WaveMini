@@ -183,7 +183,7 @@ IDWriteTextFormat* format(float size, int weight) {
     return f;
 }
 
-IDWriteTextLayout* layout(const string& s, float width, float height, float size, int weight, bool wrap, float spacing) {
+IDWriteTextLayout* makeLayout(const string& s, float width, float height, float size, int weight, bool wrap, float spacing) {
     IDWriteTextFormat* f = format(size, weight);
     if (!f) return nullptr;
     wstring w = W(s);
@@ -204,6 +204,36 @@ IDWriteTextLayout* layout(const string& s, float width, float height, float size
             l1->Release();
         }
     }
+    return l;
+}
+
+// Laying text out is the costliest part of a frame, and most text is the same from one frame
+// to the next: layouts used in this frame or the last are kept, the rest are let go.
+std::map<string, IDWriteTextLayout*> layoutsNow, layoutsBefore;
+
+void turnLayouts(bool all) {
+    for (auto& kv : layoutsBefore) kv.second->Release();
+    layoutsBefore.clear();
+    if (all) { for (auto& kv : layoutsNow) kv.second->Release(); layoutsNow.clear(); }
+    else layoutsBefore.swap(layoutsNow);
+}
+
+// The caller releases what it gets, as before.
+IDWriteTextLayout* layout(const string& s, float width, float height, float size, int weight, bool wrap, float spacing) {
+    char tail[80];
+    snprintf(tail, sizeof(tail), "\x1f%.1f|%.1f|%.1f|%d|%d|%.2f", width, height, size, weight, wrap ? 1 : 0, spacing);
+    string key = s + tail;
+    IDWriteTextLayout* l = nullptr;
+    auto found = layoutsNow.find(key);
+    if (found != layoutsNow.end()) l = found->second;
+    else {
+        auto before = layoutsBefore.find(key);
+        if (before != layoutsBefore.end()) { l = before->second; layoutsBefore.erase(before); }
+        else l = makeLayout(s, width, height, size, weight, wrap, spacing);
+        if (!l) return nullptr;
+        layoutsNow[key] = l;
+    }
+    l->AddRef();
     return l;
 }
 
@@ -285,11 +315,11 @@ CachedImage* imageFor(const string& url, bool soft) {
         // longest are forgotten (they come back from the network if they're needed again).
         size_t held = 0;
         for (auto& kv : images) held += kv.second.bytes;
-        if (held > 6 * 1024 * 1024 || images.size() > 120) {
+        if (held > 4 * 1024 * 1024 || images.size() > 110) {
             std::vector<std::pair<long long, string>> byAge;
             for (auto& kv : images) if (!kv.second.loading) byAge.emplace_back(kv.second.used, kv.first);
             std::sort(byAge.begin(), byAge.end());
-            for (size_t i = 0; i < byAge.size() && (held > 4 * 1024 * 1024 || images.size() > 90); i++) {
+            for (size_t i = 0; i < byAge.size() && (held > 3 * 1024 * 1024 || images.size() > 80); i++) {
                 CachedImage& old = images[byAge[i].second];
                 held -= std::min(held, old.bytes);
                 drop(old.bitmap);
@@ -373,7 +403,7 @@ bool gfx::start() {
     return true;
 }
 
-bool gfx::begin(HDC dc, int pxW, int pxH, float scale) {
+bool gfx::begin(HDC dc, int pxW, int pxH, float scale, bool clearAll) {
     if (!d2d) return false;
     if (!target) {
         // Software on purpose: a graphics driver in the process costs tens of megabytes.
@@ -390,7 +420,8 @@ bool gfx::begin(HDC dc, int pxW, int pxH, float scale) {
     rt->SetDpi(96 * scale, 96 * scale);
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
-    rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+    if (clearAll) rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+    turnLayouts(false);
     lost = false;
     return true;
 }
@@ -432,6 +463,18 @@ void gfx::trimImages(long long keepMs) {
     }
     drop(cachedPicture);
     cachedKey.clear();
+    turnLayouts(true);
+}
+
+void gfx::clear() { rt->Clear(D2D1::ColorF(0, 0, 0, 0)); }
+
+void gfx::shadow(Rect r, float radius, float spread, float alpha) {
+    // Rings fading outward: a soft edge without any blurring.
+    for (float i = 0.5f; i < spread; i += 1) {
+        float fade = 1 - i / spread;
+        Rect ring = r.inset(-i);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(rf(ring), radius + i, radius + i), paint(Color{0, 0, 0, alpha * fade * fade}), 1.3f);
+    }
 }
 
 // ---------------------------------------------------------------- Shapes

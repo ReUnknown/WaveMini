@@ -313,7 +313,7 @@ void windowButtons(bool withMenu, Color bg) {
 void drawPlayer() {
     const Item* song = app.current();
     string art = playerArt();
-    if (!art.empty()) gfx::image(artAt(art, 360), Rect{0, 0, 180, PLAYER}, 0, 0.55f);
+    if (!art.empty()) gfx::image(artAt(art, 360), Rect{0, 0, 170, PLAYER}, 0, 0.5f);
     else {
         // Nothing has ever played: Wave's own mark.
         gfx::fill(Rect{18, 22, 112, 112}, hex(0x36618E), 31);
@@ -376,7 +376,7 @@ void drawPlayer() {
     }
 
     bool liked = app.liked.count(song->id) > 0;
-    iconButton(Rect{left - 4, 98, 44, 44}, liked ? Icon::Liked : Icon::Like, 22, white(0), liked ? theme.accent : white(), 12, [] { toggleLike(); });
+    iconButton(Rect{left + 4, 98, 44, 44}, liked ? Icon::Liked : Icon::Like, 22, white(0), liked ? theme.accent : white(), 12, [] { toggleLike(); });
     iconButton(Rect{250, 98, 44, 44}, Icon::Prev, 22, white(0), white(), 12, [] { previousSong(); });
     iconButton(Rect{362, 98, 44, 44}, Icon::Next, 22, white(0), white(), 12, [] { nextSong(true); });
     Rect main{298, 97, 60, 46};
@@ -1444,6 +1444,7 @@ void draw(float w, float h, float shownW, float shownH) {
     float tuck = std::max(0.0f, std::min(1.0f, (full.w - shownW) / (full.w - 56)));
     float radius = 14 + (std::min(shownW, shownH) / 2 - 14) * tuck * tuck;
     Rect all{0, 0, shownW, shownH};
+    gfx::shadow(Rect{0, 3, shownW, shownH}, radius, 13, 0.3f);
     gfx::pushClip(all, radius);
     if (tuck < 0.995f) {
         bool fading = tuck > 0.004f;

@@ -60,6 +60,8 @@
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\player.cpp" />
     <ClCompile Include="src\signin.cpp" />
+    <ClCompile Include="src\smtc.cpp" />
+    <ClCompile Include="src\install.cpp" />
     <ClCompile Include="src\ui.cpp" />
     <ClCompile Include="src\yt.cpp" />
   </ItemGroup>

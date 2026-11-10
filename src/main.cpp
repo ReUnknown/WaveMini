@@ -3,12 +3,19 @@
 // picture so the look can be verified without a person at the computer.
 #include "app.h"
 #include "signin.h"
+#include "install.h"
+#include "smtc.h"
 #include <shellapi.h>
 #include <windowsx.h>
 #include <dwmapi.h>
 
 #define WM_UICALL (WM_APP + 1)
 #define WM_AUDIO (WM_APP + 2)
+#define WM_SETTLED (WM_APP + 3)
+#define WM_MEDIAKEY (WM_APP + 4)
+
+// Room around the card for its shadow, in design units.
+static const float SHADOW = 14;
 
 static HWND window;
 static HDC memoryDc;
@@ -28,6 +35,9 @@ static UINT timerMs;
 // The window's shape springs between sizes (unfolding, tucking) instead of jumping.
 static float shownW, shownH, goalW, goalH, velX, velY, velW, velH;
 static int bufferW, bufferH;
+static int margin;                 // SHADOW in pixels
+static int fullW, fullH;           // the card's size at the last whole redraw
+static long long lastInput;
 
 void invalidate() { dirty = true; }
 
@@ -57,15 +67,20 @@ static void home(int w, int h, float& x, float& y) {
 
 static void retime() {
     // Fast while something moves, slow (just the sleep timer and messages) otherwise.
-    bool lively = !app.tucked && (app.playing || app.loading || app.searchFocus || (app.settings.tab == Tab::Lyrics && app.playing));
-    UINT want = moving ? 15 : lively ? 33 : (app.tucked || IsIconic(window)) ? 1000 : 500;
+    bool away = app.tucked || IsIconic(window);
+    bool lively = !away && (app.playing || app.loading);
+    bool typing = !away && (app.searchFocus || app.naming);
+    UINT want = moving ? 15 : lively ? 50 : typing ? 110 : away ? 1000 : 500;
     if (want != timerMs) { timerMs = want; SetTimer(window, 1, want, nullptr); }
 }
 
-static void render() {
+// Draws the window. [stripOnly]: just the player at the top (the seek wave and the time are
+// all that change while a song plays), which is a fraction of the work of a whole frame.
+static void render(bool stripOnly = false) {
     if (IsIconic(window)) { dirty = false; return; }
     Size2 want = wantedSize();
     float wantW = want.w * scale, wantH = want.h * scale;
+    margin = (int)lroundf(SHADOW * scale);
     if (wantW != goalW || wantH != goalH) {
         goalW = wantW;
         goalH = wantH;
@@ -82,10 +97,11 @@ static void render() {
         placed = true;
     }
     int w = std::max(1, (int)lroundf(shownW)), h = std::max(1, (int)lroundf(shownH));
-    if (w > bufferW || h > bufferH || !bitmap) {
+    int bw = w + margin * 2, bh = h + margin * 2;
+    if (bw > bufferW || bh > bufferH || !bitmap) {
         // Only ever grows, so a changing shape doesn't mean a new bitmap every frame.
-        bufferW = std::max(bufferW, w);
-        bufferH = std::max(bufferH, h);
+        bufferW = std::max(bufferW, bw);
+        bufferH = std::max(bufferH, bh);
         if (bitmap) DeleteObject(bitmap);
         BITMAPINFO info = {};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -96,18 +112,40 @@ static void render() {
         if (!memoryDc) memoryDc = CreateCompatibleDC(nullptr);
         bitmap = CreateDIBSection(memoryDc, &info, DIB_RGB_COLORS, &bitmapBits, nullptr, 0);
         SelectObject(memoryDc, bitmap);
+        fullW = fullH = 0;
     }
     pixelW = w;
     pixelH = h;
+    // Part of the window can only be redrawn over a whole frame of the same shape.
+    stripOnly = stripOnly && w == fullW && h == fullH && !moving && !app.tucked && app.hasSession;
+    RECT strip = {0, 0, bw, margin + (int)ceilf(156 * scale)};
     for (int attempt = 0; attempt < 2; attempt++) {
-        if (!gfx::begin(memoryDc, w, h, scale)) return;
+        if (!gfx::begin(memoryDc, bw, bh, scale, !stripOnly)) return;
+        if (stripOnly) {
+            gfx::pushClip(Rect{0, 0, bw / scale, strip.bottom / scale});
+            gfx::clear();
+        }
+        gfx::pushTransform(1, SHADOW, SHADOW);
         draw(want.w, want.h, w / scale, h / scale);
+        gfx::popTransform();
+        if (stripOnly) gfx::popClip();
         if (gfx::end()) break;
+        stripOnly = false;
     }
-    POINT source = {0, 0}, place = {(LONG)lroundf(posX), (LONG)lroundf(posY)};
-    SIZE size = {w, h};
+    POINT source = {0, 0}, place = {(LONG)lroundf(posX) - margin, (LONG)lroundf(posY) - margin};
+    SIZE size = {bw, bh};
     BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-    UpdateLayeredWindow(window, nullptr, &place, &size, memoryDc, &source, 0, &blend, ULW_ALPHA);
+    UPDATELAYEREDWINDOWINFO update = {};
+    update.cbSize = sizeof(update);
+    update.pptDst = &place;
+    update.psize = &size;
+    update.hdcSrc = memoryDc;
+    update.pptSrc = &source;
+    update.pblend = &blend;
+    update.dwFlags = ULW_ALPHA;
+    update.prcDirty = stripOnly ? &strip : nullptr;
+    UpdateLayeredWindowIndirect(window, &update);
+    if (!stripOnly) { fullW = w; fullH = h; }
     dirty = false;
     retime();
 }
@@ -131,7 +169,7 @@ static void stepWindow(float dt) {
         posX = targetX; posY = targetY; shownW = goalW; shownH = goalH;
         velX = velY = velW = velH = 0;
         moving = false;
-        if (app.tucked || app.settings.tab == Tab::None) PostMessageW(window, WM_APP + 3, 0, 0);
+        if (app.tucked || app.settings.tab == Tab::None) PostMessageW(window, WM_SETTLED, 0, 0);
     }
     dirty = true;
 }
@@ -217,9 +255,17 @@ void openSongInBrowser() {
 
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
-        case WM_APP + 3: render(); trimMemory(); return 0;
+        case WM_SETTLED: render(); trimMemory(); return 0;
+        case WM_MEDIAKEY:
+            // Windows' media keys and popup: 0 play, 1 pause, 6 next, 7 previous.
+            if (wparam == 0) { if (!app.playing) togglePlay(); }
+            else if (wparam == 1) { if (app.playing || app.loading) togglePlay(); }
+            else if (wparam == 6) nextSong(true);
+            else if (wparam == 7) previousSong();
+            if (dirty) render();
+            return 0;
         case WM_SIZE: if (wparam == SIZE_MINIMIZED) trimMemory(); else if (wparam == SIZE_RESTORED) { invalidate(); render(); } return 0;
-        case WM_RBUTTONUP: uiRightClick(GET_X_LPARAM(lparam) / scale, GET_Y_LPARAM(lparam) / scale); if (dirty) render(); return 0;
+        case WM_RBUTTONUP: uiRightClick(GET_X_LPARAM(lparam) / scale - SHADOW, GET_Y_LPARAM(lparam) / scale - SHADOW); if (dirty) render(); return 0;
         case WM_UICALL: runUiCall(lparam); if (dirty && window) render(); return 0;
         case WM_AUDIO: onAudio((AudioEvent)wparam, lparam); if (dirty) render(); return 0;
         case WM_TIMER: {
@@ -227,13 +273,26 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             // Out of the way (tucked or minimized): once a minute, hand back whatever built up.
             static long long lastTrim = 0;
             if ((app.tucked || IsIconic(hwnd)) && nowMs() - lastTrim > 60000) { lastTrim = nowMs(); trimMemory(); }
-            bool lively = !app.tucked && (app.playing || app.loading || app.searchFocus);
-            if (dirty || lively) render();
+            // In view but untouched for a while: Windows can have back the pages nothing is using.
+            if (!app.tucked && nowMs() - lastInput > 20000 && nowMs() - lastTrim > 60000) {
+                lastTrim = nowMs();
+                SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+            }
+            // The caret blinks about twice a second: a redraw only when it changes.
+            static int caret = 0;
+            int blink = (int)((nowMs() / 530) % 2);
+            if ((app.searchFocus || app.naming) && blink != caret) { caret = blink; dirty = true; }
+            bool lively = !app.tucked && (app.playing || app.loading);
+            if (dirty) render();
+            else if (lively) render(true);
             else retime();
             return 0;
         }
         case WM_LBUTTONDOWN: {
-            float x = GET_X_LPARAM(lparam) / scale, y = GET_Y_LPARAM(lparam) / scale;
+            float x = GET_X_LPARAM(lparam) / scale - SHADOW, y = GET_Y_LPARAM(lparam) / scale - SHADOW;
+            lastInput = nowMs();
+            // The shadow isn't part of the card.
+            if (x < 0 || y < 0 || x > pixelW / scale || y > pixelH / scale) return 0;
             SetCapture(hwnd);
             if (app.tucked || !uiTakes(x, y)) {
                 windowDrag = true;
@@ -259,11 +318,12 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 if (dragMoved) {
                     posX = dragX + (now.x - dragCursor.x);
                     posY = dragY + (now.y - dragCursor.y);
-                    SetWindowPos(hwnd, nullptr, (int)posX, (int)posY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    SetWindowPos(hwnd, nullptr, (int)posX - margin, (int)posY - margin, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
                 }
                 return 0;
             }
-            uiMouseMove(GET_X_LPARAM(lparam) / scale, GET_Y_LPARAM(lparam) / scale);
+            lastInput = nowMs();
+            uiMouseMove(GET_X_LPARAM(lparam) / scale - SHADOW, GET_Y_LPARAM(lparam) / scale - SHADOW);
             if (dirty) render();
             return 0;
         }
@@ -297,7 +357,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 if (dragMoved && !moving) glideHome();
                 return 0;
             }
-            uiMouseUp(GET_X_LPARAM(lparam) / scale, GET_Y_LPARAM(lparam) / scale);
+            uiMouseUp(GET_X_LPARAM(lparam) / scale - SHADOW, GET_Y_LPARAM(lparam) / scale - SHADOW);
             if (dirty) render();
             return 0;
         }
@@ -305,7 +365,8 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_MOUSEWHEEL: {
             POINT at = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             ScreenToClient(hwnd, &at);
-            uiWheel(at.x / scale, at.y / scale, GET_WHEEL_DELTA_WPARAM(wparam) / (float)WHEEL_DELTA);
+            lastInput = nowMs();
+            uiWheel(at.x / scale - SHADOW, at.y / scale - SHADOW, GET_WHEEL_DELTA_WPARAM(wparam) / (float)WHEEL_DELTA);
             if (dirty) render();
             return 0;
         }
@@ -334,6 +395,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_CLOSE:
             saveState();
             signin::close();
+            smtc::stop();
             audio::stop();
             DestroyWindow(hwnd);
             return 0;
@@ -358,7 +420,7 @@ static Item fake(Kind kind, const char* id, const char* title, const char* artis
 static void savePicture(const wstring& dir, const wchar_t* name) {
     Size2 want = wantedSize();
     const float s = 2;
-    int w = (int)(want.w * s), h = (int)(want.h * s);
+    int w = (int)((want.w + SHADOW * 2) * s), h = (int)((want.h + SHADOW * 2) * s);
     BITMAPINFO info = {};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     info.bmiHeader.biWidth = w;
@@ -372,7 +434,12 @@ static void savePicture(const wstring& dir, const wchar_t* name) {
     // Twice, with messages handled in between, so covers that were asked for have arrived.
     for (int pass = 0; pass < 2; pass++) {
         uiFrame(-1);   // no motion in a still picture: everything at rest
-        if (gfx::begin(dc, w, h, s)) { draw(want.w, want.h, want.w, want.h); gfx::end(); }
+        if (gfx::begin(dc, w, h, s)) {
+            gfx::pushTransform(1, SHADOW, SHADOW);
+            draw(want.w, want.h, want.w, want.h);
+            gfx::popTransform();
+            gfx::end();
+        }
         if (pass == 0) {
             long long until = nowMs() + 2500;
             MSG msg;
@@ -601,13 +668,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc >= 3 && wstring(argv[1]) == L"--render") return renderCheck(argv[2]);
+    if (argv && install::handle(argc, argv)) return 0;
+    bool afterUpdate = argv && argc >= 2 && wstring(argv[1]) == L"--after-update";
 
     // One WaveMini at a time: a second start just brings the first forward.
     HANDLE once = CreateMutexW(nullptr, TRUE, L"WaveMini.SingleInstance");
     if (once && GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (HWND other = FindWindowW(L"WaveMiniWindow", nullptr)) SetForegroundWindow(other);
-        return 0;
+        // Straight after an update the old one is still closing: give it a moment.
+        bool free = false;
+        for (int i = 0; afterUpdate && i < 60 && !free; i++) free = WaitForSingleObject(once, 100) != WAIT_TIMEOUT;
+        if (!free) {
+            if (HWND other = FindWindowW(L"WaveMiniWindow", nullptr)) SetForegroundWindow(other);
+            return 0;
+        }
     }
+    install::cleanUp();
 
     loadState();
     WNDCLASSEXW cls = {};
@@ -627,6 +702,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     setUiWindow(window, WM_UICALL);
     gfx::onImage([] { invalidate(); });
     audio::start(window, WM_AUDIO);
+    smtc::start(window, WM_MEDIAKEY);
+    lastInput = nowMs();
     // Start in the saved corner of the screen the pointer is on.
     POINT cursor;
     GetCursorPos(&cursor);
@@ -637,6 +714,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     render();
     ShowWindow(window, SW_SHOWNOACTIVATE);
     background([] { yt::warmUp(); });
+    install::checkDaily();
 
     // While anything is moving, one frame per screen refresh (whatever the monitor's rate);
     // otherwise asleep until something happens.
@@ -644,6 +722,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     LARGE_INTEGER frequency, last = {}, now;
     QueryPerformanceFrequency(&frequency);
     bool running = true, inMotion = false;
+    DEVMODEW mode = {};
+    mode.dmSize = sizeof(mode);
+    bool fastScreen = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 100;
     while (running) {
         if (window && (moving || uiAnimating()) && !windowDrag) {
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -661,6 +742,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             uiFrame(dt);
             render();
             if (FAILED(DwmFlush())) Sleep(8);
+            else if (!moving && fastScreen) DwmFlush();
         } else {
             inMotion = false;
             if (GetMessageW(&msg, nullptr, 0, 0) <= 0) break;
