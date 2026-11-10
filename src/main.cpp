@@ -334,7 +334,7 @@ static int renderCheck(const wstring& dir) {
         }
     }
     NextResult radio;
-    if (!songs.empty()) radio = yt::next(songs[0].id);
+    if (!songs.empty()) radio = yt::next(songs[0].id, "RDAMVM" + songs[0].id);
     log += "radio songs: " + std::to_string(radio.songs.size()) + ", lyrics id: " + radio.lyricsId + "\r\n";
     if (radio.songs.size() < 4) {
         radio.songs = {fake(Kind::Song, "a1", "Harbor Lights", "Lumen Coast", 204, "Tidewater"), fake(Kind::Song, "a2", "Paper Moons", "Ivy Halden", 178),

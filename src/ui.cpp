@@ -241,7 +241,7 @@ void drawPlayer() {
             return;
         }
         gfx::text("LAST PLAYED", Rect{left, 15, textW, 14}, 11, Bold, theme.accent, AlignLeft, false, false, 0.9f);
-        label(app.last.title, left, 31, textW, 16, Bold, white());
+        label(app.last.title, left, 31, textW + 30, 16, Bold, white());
         label(app.last.subtitle(), left, 54, W_ - left - 16, 13, Regular, white(0.75f));
         float x = left;
         x += pill(x, 96, 42, "Play", (int)Icon::Play, true, 14, 16, 14, [] { playLast(false); }) + 6;

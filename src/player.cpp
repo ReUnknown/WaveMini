@@ -283,7 +283,11 @@ void playRadio(const Item& song) {
     app.hasLast = true;
     playSongs({song}, 0, "Songs like " + song.title);
     string id = song.id;
-    async<NextResult>([id] { return yt::next(id); }, [id](NextResult radio) {
+    async<NextResult>([id] {
+        // The song's own radio; plain "next" as a fallback.
+        NextResult radio = yt::next(id, "RDAMVM" + id);
+        return radio.songs.size() > 1 ? radio : yt::next(id);
+    }, [id](NextResult radio) {
         // Still on that song, with nothing queued after it?
         if (app.queue.size() != 1 || app.queue[0].id != id) return;
         for (auto& s : radio.songs) if (s.id != id) app.queue.push_back(s);
