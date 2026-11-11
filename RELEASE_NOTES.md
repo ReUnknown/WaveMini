@@ -5,7 +5,7 @@ The first public beta of WaveMini: Wave's mini player as its own tiny, native Wi
 ## What's in it
 - **Ad-free YouTube Music in one small window**, signed in or not.
 - **Home and search in one tab**, with suggestions while you type.
-- **Lyrics sung word by word**: each word fills in and lifts as it's sung.
+- **Lyrics sung word by word**: each word fills in and lifts as it's sung. WaveMini estimates word timing when the source only provides line timing.
 - **Up next**: drag to reorder, play next, add to queue, radio.
 - **Your library**: likes, history, playlists, albums and artists; save albums, make playlists, add and remove songs.
 - **Floats on top**, snaps to a corner, tucks against the screen's edge.

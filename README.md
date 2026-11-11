@@ -4,13 +4,13 @@
 
 The [Wave](https://github.com/ReUnknown/Wave) mini player as its own tiny Windows app: an ad-free YouTube Music client that lives entirely in one small window. No big app behind it: sign-in, home, search, Up next, lyrics, artists, albums, your library and account all fit inside the mini player.
 
-Written in native Windows code (C++, no browser engine, no Java) to be small, fast and light on memory. The whole app is one file under 1 MB.
+WaveMini uses native Windows C++ for the player and interface. The portable app is a single executable. Google sign-in opens in Microsoft Edge WebView2.
 
 > **Beta.** Things will break. YouTube changes often, and playback is the first thing to go when it does.
 
 ## Get it
 
-Download from [Releases](https://github.com/ReUnknown/WaveMini/releases):
+Download the [0.8.0 beta](https://github.com/ReUnknown/WaveMini/releases/tag/v0.8.0-beta) from GitHub Releases:
 
 - **WaveMini-Setup.exe** installs it: Start menu shortcut, an entry in Windows' installed apps, updates itself.
 - **WaveMini.exe** is the same app without installing: run it from anywhere.
@@ -24,7 +24,7 @@ Needs Windows 10 or 11. Signing in uses Microsoft Edge WebView2, which Windows 1
 - **Plays YouTube Music without ads**, signed in or not.
 - **Home and search** in one tab, with suggestions while you type.
 - **Up next**: drag songs to reorder, play next, add to queue, radio.
-- **Lyrics** sung word by word.
+- **Lyrics** fill in word by word when timed lyrics are available. When the source only provides line timing, WaveMini estimates when each word starts.
 - **Your library**: likes, history, playlists, albums, artists. Save albums, make playlists, add and remove songs.
 - **Floats on top**, snaps to a corner, and tucks against the edge of the screen as a small round button.
 - **Media keys** and Windows' media popup work from any app.
