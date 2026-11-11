@@ -582,16 +582,17 @@ void drawLyrics() {
         float dim = 0.36f - 0.045f * away;
         float scale = 0.95f + 0.05f * lit;
         gfx::pushTransform(scale, left * (1 - scale), (y + line.h / 2) * (1 - scale));
-        if (current && !line.words.empty()) {
-            int sung = 0, wordChars = 0;
-            float part = 0;
+        if (!line.words.empty() && lit > 0.02f) {
+            // The line being sung (and, for a moment, the one just finished): word by word.
+            std::vector<gfx::SungWord> sung;
+            sung.reserve(line.words.size());
             for (auto& word : line.words) {
-                if (word.at > at) break;
-                sung = word.from;
-                wordChars = word.count;
-                part = (float)std::max(0.0, std::min(1.0, (at - word.at) / std::max(0.06, word.end - word.at)));
+                double length = std::max(0.08, word.end - word.at);
+                float part = !current ? 1.0f : (float)std::max(0.0, std::min(1.0, (at - word.at) / length));
+                sung.push_back(gfx::SungWord{word.from, word.count, part});
             }
-            gfx::textSung(line.text, r, size, Bold, white(0.38f + 0.1f * lit), white(), sung, wordChars, part);
+            float dimmed = dim + (0.5f - dim) * lit;
+            gfx::textWords(line.text, r, size, Bold, white(dimmed), white(dimmed + (1 - dimmed) * lit), sung.data(), (int)sung.size(), 2.2f * lit);
         } else gfx::text(line.text, r, size, Bold, white(dim + (1 - dim) * lit), AlignLeft, true, true);
         gfx::popTransform();
     }

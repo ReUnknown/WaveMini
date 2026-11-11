@@ -1,32 +1,46 @@
 # WaveMini
 
-The Wave mini player as its own tiny Windows app: an ad-free YouTube Music client that lives entirely in one small window. No big app behind it: sign-in, Up next, lyrics, search, artists, albums, your library and account all fit inside the mini player.
+<img src="icon.png" width="96" alt="WaveMini">
 
-Built in native Windows code to be small, fast and light on memory.
+The [Wave](https://github.com/ReUnknown/Wave) mini player as its own tiny Windows app: an ad-free YouTube Music client that lives entirely in one small window. No big app behind it: sign-in, home, search, Up next, lyrics, artists, albums, your library and account all fit inside the mini player.
 
-## Build on Windows
+Written in native Windows code (C++, no browser engine, no Java) to be small, fast and light on memory. The whole app is one file under 1 MB.
 
-1. Install Visual Studio 2022 with **Desktop development with C++**, the **MSVC v143** toolset, and a Windows SDK.
-2. Open `WaveMini.sln`. If Visual Studio does not restore automatically, right-click the solution and select **Restore NuGet Packages**.
-3. Select **Release | x64** and build the solution. The executable is at `build/vs/x64/Release/WaveMini.exe`. Use **Debug | x64** to step through the source.
+> **Beta.** Things will break. YouTube changes often, and playback is the first thing to go when it does.
 
-The project links the WebView2 loader statically, so the build has one EXE. Google sign-in and verification use the installed Microsoft Edge WebView2 Runtime. The existing CMake build also works with an unpacked WebView2 NuGet package passed as `-DWEBVIEW2_DIR=...`.
+## Get it
 
-## Windows playback
+Download from [Releases](https://github.com/ReUnknown/WaveMini/releases):
 
-WaveMini adjusts short leading edits in fragmented audio files before handing them to Windows MediaPlayer. The adjustment applies to new downloads and existing cached tracks. If Windows still ends a track early, WaveMini tries another audio source.
+- **WaveMini-Setup.exe** installs it: Start menu shortcut, an entry in Windows' installed apps, updates itself.
+- **WaveMini.exe** is the same app without installing: run it from anywhere.
 
-## Plan
+Windows will warn that the app is from an unknown publisher (it isn't signed): choose **More info**, then **Run anyway**.
 
-- **Windows only** for now
-- **Native**: C++ with Win32, Direct2D for the interface, and Windows MediaPlayer for audio
-- **Light**: aiming for about 25 MB of memory while playing, and about 10 MB tucked away
-- **Same look as WaveMini in [Wave](https://github.com/ReUnknown/Wave)**: the player on top, tabs for Up next, Lyrics, Search, Library and Account, with colors from the song's cover
+Needs Windows 10 or 11. Signing in uses Microsoft Edge WebView2, which Windows 11 already has.
 
-## Related
+## What it does
 
-- [Wave](https://github.com/ReUnknown/Wave): the full app for Android, Windows, macOS and Linux
+- **Plays YouTube Music without ads**, signed in or not.
+- **Home and search** in one tab, with suggestions while you type.
+- **Up next**: drag songs to reorder, play next, add to queue, radio.
+- **Lyrics** sung word by word.
+- **Your library**: likes, history, playlists, albums, artists. Save albums, make playlists, add and remove songs.
+- **Floats on top**, snaps to a corner, and tucks against the edge of the screen as a small round button.
+- **Media keys** and Windows' media popup work from any app.
+- **Light**: drawn on the CPU with no graphics driver loaded, one song cached at a time, and memory handed back when it's tucked away.
+
+## Build it
+
+Needs Visual Studio 2022 (C++), CMake, and the `Microsoft.Web.WebView2` NuGet package unpacked somewhere.
+
+```
+cmake -B build -A x64 -DWEBVIEW2_DIR=path\to\Microsoft.Web.WebView2.1.0.2903.40
+cmake --build build --config Release
+```
+
+`WaveMini.exe --render some\folder` saves a picture of every screen, which is how the look is checked on every push.
 
 ## License
 
-GPL-3.0, same as Wave.
+GPL-3.0, same as Wave. WaveMini isn't affiliated with YouTube or Google.

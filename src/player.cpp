@@ -737,6 +737,33 @@ static LyricsResult parseLyrics(const Json& entry) {
     return out;
 }
 
+// Lyrics timed line by line: each line's words are spread over the time it takes, by length,
+// so the singing still moves through the words.
+static void spreadWords(std::vector<LyricLine>& lines) {
+    for (size_t i = 0; i < lines.size(); i++) {
+        LyricLine& line = lines[i];
+        if (!line.words.empty()) continue;
+        std::vector<string> words = split(line.text, " ");
+        double letters = 0;
+        for (auto& w : words) letters += (double)W(w).size() + 1;
+        if (letters <= 0) continue;
+        // About how long the line is sung for: until the next one, but not through a long break.
+        double natural = std::max(1.2, std::min(9.0, letters * 0.085));
+        double until = i + 1 < lines.size() ? lines[i + 1].at - 0.15 : line.at + natural;
+        double length = std::max(0.6, std::min(until - line.at, natural * 1.6));
+        line.end = line.at + length;
+        double at = line.at;
+        int from = 0;
+        for (auto& w : words) {
+            int count = (int)W(w).size();
+            double share = length * (count + 1) / letters;
+            if (count > 0) line.words.push_back(LyricLine::Word{at, at + share, from, count});
+            at += share;
+            from += count + 1;
+        }
+    }
+}
+
 void loadLyrics() {
     const Item* song = app.current();
     if (!song || app.lyricsFor == song->id) return;
@@ -786,6 +813,7 @@ void loadLyrics() {
         return result;
     }, [s](LyricsResult result) {
         if (app.lyricsFor != s.id) return;
+        if (result.synced) spreadWords(result.lines);
         app.lyrics = std::move(result.lines);
         app.lyricsSynced = result.synced;
         app.lyricsLoading = false;

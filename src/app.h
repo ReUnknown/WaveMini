@@ -6,7 +6,7 @@
 #include "yt.h"
 #include <set>
 
-#define WAVEMINI_VERSION "0.2.0"
+#define WAVEMINI_VERSION "0.8.0"
 
 enum class Tab { None, UpNext, Lyrics, Search, Library, Account };
 

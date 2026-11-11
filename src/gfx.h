@@ -54,6 +54,10 @@ void text(const string& s, Rect r, float size, int weight, Color c, int align = 
 // A wrapped lyric line: [dim] all over, then [bright] over its first [sungChars] letters (UTF-16)
 // and over [wordPart] (0..1) of the [wordChars] after them.
 void textSung(const string& s, Rect r, float size, int weight, Color dim, Color bright, int sungChars, int wordChars, float wordPart);
+// A lyric line sung word by word: each word is [dim] until its turn, fills with [bright] from
+// the left ([part] 0..1, with a soft edge) and rises by [lift] as it does.
+struct SungWord { int from, count; float part; };   // letters in UTF-16
+void textWords(const string& s, Rect r, float size, int weight, Color dim, Color bright, const SungWord* words, int count, float lift);
 float textWidth(const string& s, float size, int weight, float spacing = 0);
 float textHeight(const string& s, float width, float size, int weight);
 void icon(Icon which, Rect r, Color c);

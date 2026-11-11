@@ -595,6 +595,51 @@ void gfx::textSung(const string& s, Rect r, float size, int weight, Color dim, C
     l->Release();
 }
 
+void gfx::textWords(const string& s, Rect r, float size, int weight, Color dim, Color bright, const SungWord* words, int count, float lift) {
+    if (s.empty() || r.w <= 0) return;
+    IDWriteTextLayout* l = layout(s, r.w, r.h, size, weight, true, 0);
+    if (!l) return;
+    l->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    l->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    D2D1_MATRIX_3X2_F before;
+    rt->GetTransform(&before);
+    for (int i = 0; i < count; i++) {
+        const SungWord& word = words[i];
+        DWRITE_HIT_TEST_METRICS boxes[4];
+        UINT32 got = 0;
+        if (word.count <= 0 || FAILED(l->HitTestTextRange((UINT32)word.from, (UINT32)word.count, r.x, r.y, boxes, 4, &got))) continue;
+        float part = std::max(0.0f, std::min(1.0f, word.part));
+        // A word rises a little as it's sung, and stays up until the line is done.
+        float eased = part * part * (3 - 2 * part);
+        rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -lift * eased) * before);
+        for (UINT32 b = 0; b < got; b++) {
+            D2D1_RECT_F box = D2D1::RectF(boxes[b].left - 1, boxes[b].top - 3, boxes[b].left + boxes[b].width + 1, boxes[b].top + boxes[b].height + 3);
+            rt->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(dim));
+            if (part >= 1) rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(bright));
+            else if (part > 0) {
+                // The bright color sweeps across with a soft leading edge, not a hard line.
+                float soft = std::min(0.45f, 12 / std::max(12.0f, boxes[b].width));
+                float edge = part * (1 + soft);
+                D2D1_GRADIENT_STOP stops[2] = {{std::max(0.0f, edge - soft), D2D1::ColorF(0, 0, 0, 1)}, {std::min(1.0f, edge), D2D1::ColorF(0, 0, 0, 0)}};
+                ID2D1GradientStopCollection* collection = nullptr;
+                ID2D1LinearGradientBrush* sweep = nullptr;
+                if (SUCCEEDED(rt->CreateGradientStopCollection(stops, 2, &collection)) &&
+                    SUCCEEDED(rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(box.left, 0), D2D1::Point2F(box.right, 0)), collection, &sweep))) {
+                    rt->PushLayer(D2D1::LayerParameters(box, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), 1, sweep), nullptr);
+                    rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(bright));
+                    rt->PopLayer();
+                }
+                drop(sweep);
+                drop(collection);
+            }
+            rt->PopAxisAlignedClip();
+        }
+    }
+    rt->SetTransform(before);
+    l->Release();
+}
+
 float gfx::textWidth(const string& s, float size, int weight, float spacing) {
     IDWriteTextLayout* l = layout(s, 4000, 100, size, weight, false, spacing);
     if (!l) return 0;

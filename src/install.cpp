@@ -127,9 +127,11 @@ struct Outcome { int result = 0; string version; };   // 0 couldn't check, 1 up 
 
 Outcome fetchUpdate() {
     Outcome out;
-    HttpRes res = http("GET", "https://api.github.com/repos/ReUnknown/WaveMini/releases/latest", {{"User-Agent", "WaveMini"}, {"Accept", "application/vnd.github+json"}});
+    // The newest release, betas included (GitHub's "latest" leaves those out).
+    HttpRes res = http("GET", "https://api.github.com/repos/ReUnknown/WaveMini/releases?per_page=1", {{"User-Agent", "WaveMini"}, {"Accept", "application/vnd.github+json"}});
     if (!res.ok()) return out;
-    Json release = Json::parse(res.body);
+    Json list = Json::parse(res.body);
+    const Json& release = list[0];
     out.version = release["tag_name"].str();
     if (out.version.empty()) return out;
     if (!newer(out.version, WAVEMINI_VERSION)) { out.result = 1; return out; }
