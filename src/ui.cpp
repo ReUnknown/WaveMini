@@ -1127,17 +1127,17 @@ void drawAccount() {
     float saverW = gfx::textWidth("Saver", 13, Bold) + 24, highW = gfx::textWidth("High", 13, Bold) + 24;
     chip(W_ - 16 - saverW, y + 5, "Saver", app.settings.saver, [] { app.settings.saver = true; saveState(); });
     chip(W_ - 16 - saverW - 6 - highW, y + 5, "High", !app.settings.saver, [] { app.settings.saver = false; saveState(); });
-    y += 42;
+    y += 37;
     toggle(y, "Even volume across songs", app.settings.evenVolume, [] { app.settings.evenVolume = !app.settings.evenVolume; applyVolume(); saveState(); });
-    y += 42;
+    y += 37;
     toggle(y, "Keep playing similar songs", app.settings.autoplay, [] { app.settings.autoplay = !app.settings.autoplay; saveState(); });
-    y += 42;
+    y += 37;
     toggle(y, "Stay on top of other windows", app.settings.onTop, [] { app.settings.onTop = !app.settings.onTop; applyOnTop(); saveState(); });
-    y += 42;
+    y += 37;
     toggle(y, "Follow me across virtual desktops", app.settings.followDesktops, [] { app.settings.followDesktops = !app.settings.followDesktops; saveState(); });
-    y += 42;
+    y += 37;
     toggle(y, "Start with Windows", app.settings.startWithWindows, [] { setStartWithWindows(!app.settings.startWithWindows); });
-    y += 44;
+    y += 40;
     endScroll(list, app.accountScroll, y);
 
     float foot = TOP + PANEL - 44;
