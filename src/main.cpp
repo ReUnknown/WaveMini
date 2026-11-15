@@ -8,6 +8,7 @@
 #include <shellapi.h>
 #include <windowsx.h>
 #include <dwmapi.h>
+#include <shobjidl.h>
 
 #define WM_UICALL (WM_APP + 1)
 #define WM_AUDIO (WM_APP + 2)
@@ -41,6 +42,92 @@ static long long lastInput;
 
 void invalidate() { dirty = true; }
 
+// ---------------------------------------------------------------- Corners, rounded in the pixels
+
+// The card is drawn square; its corners are then rounded right in the bitmap: each corner pixel
+// becomes part card, part the shadow that would show behind it. (Asking the drawing library to
+// clip a whole window to a rounded shape costs a full extra layer on every frame.)
+struct ShadowCorners {
+    float scale = 0;
+    int size = 0;                              // each corner is size x size pixels
+    std::vector<uint32_t> corner[4];           // top-left, top-right, bottom-left, bottom-right
+};
+static ShadowCorners shadowCorners;
+
+static void cornerOrigin(int which, int margin, int w, int h, int size, int& x, int& y) {
+    x = which % 2 == 0 ? margin : margin + w - size;
+    y = which < 2 ? margin : margin + h - size;
+}
+
+// Paints the shadow alone and keeps what's under the four corners.
+static void captureShadow(HDC dc, uint32_t* bits, int stride, int bw, int bh, int margin, int w, int h, float s) {
+    ShadowCorners& sc = shadowCorners;
+    sc.scale = 0;
+    sc.size = (int)ceilf(14 * s) + 1;
+    if (w < sc.size * 2 || h < sc.size * 2 || !gfx::begin(dc, bw, bh, s)) return;
+    gfx::pushTransform(1, SHADOW, SHADOW);
+    uiShadow(w / s, h / s, 14);
+    gfx::popTransform();
+    if (!gfx::end()) return;
+    GdiFlush();
+    for (int c = 0; c < 4; c++) {
+        int ox, oy;
+        cornerOrigin(c, margin, w, h, sc.size, ox, oy);
+        sc.corner[c].resize((size_t)sc.size * sc.size);
+        for (int y = 0; y < sc.size; y++) memcpy(&sc.corner[c][(size_t)y * sc.size], bits + (size_t)(oy + y) * stride + ox, sc.size * sizeof(uint32_t));
+    }
+    sc.scale = s;
+}
+
+static void roundCorners(uint32_t* bits, int stride, int margin, int w, int h, float s, bool topOnly) {
+    const ShadowCorners& sc = shadowCorners;
+    if (sc.scale != s || w < sc.size * 2 || h < sc.size * 2) return;
+    float radius = 14 * s;
+    for (int c = 0; c < (topOnly ? 2 : 4); c++) {
+        int ox, oy;
+        cornerOrigin(c, margin, w, h, sc.size, ox, oy);
+        // The center of this corner's arc.
+        float cx = c % 2 == 0 ? margin + radius : margin + w - radius, cy = c < 2 ? margin + radius : margin + h - radius;
+        for (int y = 0; y < sc.size; y++) for (int x = 0; x < sc.size; x++) {
+            float px = ox + x + 0.5f, py = oy + y + 0.5f;
+            bool outward = (c % 2 == 0 ? px < cx : px > cx) && (c < 2 ? py < cy : py > cy);
+            if (!outward) continue;
+            float cover = radius + 0.5f - sqrtf((px - cx) * (px - cx) + (py - cy) * (py - cy));
+            if (cover >= 1) continue;
+            if (cover < 0) cover = 0;
+            uint32_t& pixel = bits[(size_t)(oy + y) * stride + ox + x];
+            uint32_t under = sc.corner[c][(size_t)y * sc.size + x], out = 0;
+            for (int shift = 0; shift < 32; shift += 8) {
+                float value = ((pixel >> shift) & 255) * cover + ((under >> shift) & 255) * (1 - cover);
+                out |= (uint32_t)(value + 0.5f) << shift;
+            }
+            pixel = out;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Following you across desktops
+
+// Windows' documented virtual desktop manager can't pin a window everywhere, but it can move
+// one of our own: when WaveMini finds itself left on another desktop, it comes to the one the
+// window in front of you is on.
+static void followDesktop(HWND hwnd) {
+    static IVirtualDesktopManager* manager = nullptr;
+    static bool tried = false;
+    static const GUID managerClass = {0xaa509086, 0x5ca9, 0x4c25, {0x8f, 0x95, 0x58, 0x9d, 0x3c, 0x07, 0xb4, 0x8a}};
+    if (!tried) {
+        tried = true;
+        CoCreateInstance(managerClass, nullptr, CLSCTX_ALL, __uuidof(IVirtualDesktopManager), (void**)&manager);
+    }
+    if (!manager || IsIconic(hwnd)) return;
+    BOOL here = TRUE;
+    if (FAILED(manager->IsWindowOnCurrentVirtualDesktop(hwnd, &here)) || here) return;
+    HWND front = GetForegroundWindow();
+    GUID desktop = {};
+    if (!front || front == hwnd || FAILED(manager->GetWindowDesktopId(front, &desktop)) || desktop == GUID{}) return;
+    manager->MoveWindowToDesktop(hwnd, desktop);
+}
+
 // ---------------------------------------------------------------- Where the window sits
 
 static RECT workArea() {
@@ -70,7 +157,9 @@ static void retime() {
     bool away = app.tucked || IsIconic(window);
     bool lively = !away && (app.playing || app.loading);
     bool typing = !away && (app.searchFocus || app.naming);
-    UINT want = moving ? 15 : lively ? 50 : typing ? 110 : away ? 1000 : 500;
+    // Following you across desktops means looking a few times a second.
+    UINT idle = app.settings.followDesktops ? 400 : away ? 1000 : 500;
+    UINT want = moving ? 15 : lively ? 50 : typing ? 110 : idle;
     if (want != timerMs) { timerMs = want; SetTimer(window, 1, want, nullptr); }
 }
 
@@ -116,6 +205,10 @@ static void render(bool stripOnly = false) {
     }
     pixelW = w;
     pixelH = h;
+    if (shadowCorners.scale != scale && !app.tucked && !moving) {
+        captureShadow(memoryDc, (uint32_t*)bitmapBits, bufferW, bw, bh, margin, w, h, scale);
+        fullW = fullH = 0;      // that pass wiped the bitmap
+    }
     // Part of the window can only be redrawn over a whole frame of the same shape.
     stripOnly = stripOnly && w == fullW && h == fullH && !moving && !app.tucked && app.hasSession;
     RECT strip = {0, 0, bw, margin + (int)ceilf(156 * scale)};
@@ -131,6 +224,10 @@ static void render(bool stripOnly = false) {
         if (stripOnly) gfx::popClip();
         if (gfx::end()) break;
         stripOnly = false;
+    }
+    if (uiCornerRadius() > 0) {
+        GdiFlush();
+        roundCorners((uint32_t*)bitmapBits, bufferW, margin, w, h, scale, stripOnly);
     }
     POINT source = {0, 0}, place = {(LONG)lroundf(posX) - margin, (LONG)lroundf(posY) - margin};
     SIZE size = {bw, bh};
@@ -270,6 +367,8 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_AUDIO: onAudio((AudioEvent)wparam, lparam); if (dirty) render(); return 0;
         case WM_TIMER: {
             tick();
+            static long long lastFollow = 0;
+            if (app.settings.followDesktops && nowMs() - lastFollow > 350) { lastFollow = nowMs(); followDesktop(hwnd); }
             // Out of the way (tucked or minimized): once a minute, hand back whatever built up.
             static long long lastTrim = 0;
             if ((app.tucked || IsIconic(hwnd)) && nowMs() - lastTrim > 60000) { lastTrim = nowMs(); trimMemory(); }
@@ -431,6 +530,8 @@ static void savePicture(const wstring& dir, const wchar_t* name) {
     void* bits = nullptr;
     HBITMAP picture = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
     HGDIOBJ before = SelectObject(dc, picture);
+    int cardW = (int)(want.w * s), cardH = (int)(want.h * s), edge = (int)(SHADOW * s);
+    if (!app.tucked) captureShadow(dc, (uint32_t*)bits, w, w, h, edge, cardW, cardH, s);
     // Twice, with messages handled in between, so covers that were asked for have arrived.
     for (int pass = 0; pass < 2; pass++) {
         uiFrame(-1);   // no motion in a still picture: everything at rest
@@ -448,6 +549,10 @@ static void savePicture(const wstring& dir, const wchar_t* name) {
                 Sleep(20);
             }
         }
+    }
+    if (uiCornerRadius() > 0) {
+        GdiFlush();
+        roundCorners((uint32_t*)bits, w, edge, cardW, cardH, s, false);
     }
     GdiFlush();
     gfx::savePng(dir + L"\\" + name + L".png", bits, w, h);

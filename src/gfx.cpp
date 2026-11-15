@@ -241,7 +241,8 @@ IDWriteTextLayout* layout(const string& s, float width, float height, float size
 
 struct CachedImage {
     ID2D1Bitmap* bitmap = nullptr;
-    IWICBitmap* pixels = nullptr;   // decoded, waiting to become a bitmap for the target
+    std::vector<BYTE> pixels;       // decoded, waiting to become a bitmap for the target
+    UINT pw = 0, ph = 0;
     Color color;
     bool hasColor = false, loading = false, failed = false;
     long long used = 0;
@@ -249,59 +250,65 @@ struct CachedImage {
 };
 std::map<string, CachedImage> images;
 
-void decode(const string& key, const string& bytes, bool soft) {
-    CachedImage& entry = images[key];
-    entry.loading = false;
-    entry.failed = true;
-    if (bytes.empty() || !wic) return;
+// A picture's pixels, ready to become a bitmap. Decoding is the slow part, so it happens on
+// the worker that fetched the picture, never on the window's thread (where it would hitch).
+struct Decoded {
+    std::vector<BYTE> pixels;       // premultiplied BGRA
+    UINT w = 0, h = 0;
+    Color color;
+    bool hasColor = false;
+};
+
+Decoded decodeImage(const string& bytes, bool soft) {
+    Decoded out;
+    if (bytes.empty()) return out;
+    IWICImagingFactory* factory = nullptr;   // this thread's own
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) return out;
     IStream* stream = SHCreateMemStream((const BYTE*)bytes.data(), (UINT)bytes.size());
     IWICBitmapDecoder* decoder = nullptr;
     IWICBitmapFrameDecode* frame = nullptr;
     IWICFormatConverter* converter = nullptr;
     IWICBitmapScaler* scaler = nullptr;
-    if (stream && SUCCEEDED(wic->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
-        SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(wic->CreateFormatConverter(&converter)) &&
+    if (stream && SUCCEEDED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(factory->CreateFormatConverter(&converter)) &&
         SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeMedianCut))) {
         IWICBitmapSource* source = converter;
         UINT w = 0, h = 0;
         converter->GetSize(&w, &h);
-        if (soft && std::min(w, h) > 12 && SUCCEEDED(wic->CreateBitmapScaler(&scaler))) {
+        if (soft && std::min(w, h) > 12 && SUCCEEDED(factory->CreateBitmapScaler(&scaler))) {
             // Average nearby pixels once. Linear interpolation softens the preview when drawn.
             double ratio = 12.0 / std::min(w, h);
-            if (SUCCEEDED(scaler->Initialize(converter, (UINT)lround(w * ratio), (UINT)lround(h * ratio), WICBitmapInterpolationModeFant)))
+            if (SUCCEEDED(scaler->Initialize(converter, (UINT)lround(w * ratio), (UINT)lround(h * ratio), WICBitmapInterpolationModeFant))) {
                 source = scaler;
-        }
-        entry.failed = FAILED(wic->CreateBitmapFromSource(source, WICBitmapCacheOnLoad, &entry.pixels));
-    }
-    if (!entry.failed && !soft) {
-        // The overall color: the average of its livelier pixels.
-        UINT w = 0, h = 0;
-        entry.pixels->GetSize(&w, &h);
-        IWICBitmapLock* lock = nullptr;
-        WICRect all = {0, 0, (INT)w, (INT)h};
-        if (w && h && SUCCEEDED(entry.pixels->Lock(&all, WICBitmapLockRead, &lock))) {
-            UINT size = 0, stride = 0;
-            BYTE* data = nullptr;
-            lock->GetStride(&stride);
-            lock->GetDataPointer(&size, &data);
-            double r = 0, g = 0, b = 0, weight = 0;
-            UINT step = std::max<UINT>(1, std::min(w, h) / 24);
-            for (UINT y = 0; y < h; y += step) for (UINT x = 0; x < w; x += step) {
-                BYTE* px = data + y * stride + x * 4;
-                double pb = px[0] / 255.0, pg = px[1] / 255.0, pr = px[2] / 255.0;
-                double hi = std::max(pr, std::max(pg, pb)), lo = std::min(pr, std::min(pg, pb));
-                double k = 0.05 + (hi - lo) * (hi > 0.15 ? 1 : 0.2);
-                r += pr * k; g += pg * k; b += pb * k; weight += k;
+                scaler->GetSize(&w, &h);
             }
-            if (weight > 0) { entry.color = Color{(float)(r / weight), (float)(g / weight), (float)(b / weight), 1}; entry.hasColor = true; }
-            lock->Release();
         }
+        if (w && h && w <= 4096 && h <= 4096) {
+            out.pixels.resize((size_t)w * h * 4);
+            if (SUCCEEDED(source->CopyPixels(nullptr, w * 4, (UINT)out.pixels.size(), out.pixels.data()))) { out.w = w; out.h = h; }
+            else out.pixels.clear();
+        }
+    }
+    if (out.w && !soft) {
+        // The overall color: the average of its livelier pixels.
+        double r = 0, gsum = 0, b = 0, weight = 0;
+        UINT step = std::max<UINT>(1, std::min(out.w, out.h) / 24);
+        for (UINT y = 0; y < out.h; y += step) for (UINT x = 0; x < out.w; x += step) {
+            const BYTE* px = out.pixels.data() + ((size_t)y * out.w + x) * 4;
+            double pb = px[0] / 255.0, pg = px[1] / 255.0, pr = px[2] / 255.0;
+            double hi = std::max(pr, std::max(pg, pb)), lo = std::min(pr, std::min(pg, pb));
+            double k = 0.05 + (hi - lo) * (hi > 0.15 ? 1 : 0.2);
+            r += pr * k; gsum += pg * k; b += pb * k; weight += k;
+        }
+        if (weight > 0) { out.color = Color{(float)(r / weight), (float)(gsum / weight), (float)(b / weight), 1}; out.hasColor = true; }
     }
     drop(scaler);
     drop(converter);
     drop(frame);
     drop(decoder);
     drop(stream);
+    factory->Release();
+    return out;
 }
 
 CachedImage* imageFor(const string& url, bool soft) {
@@ -309,7 +316,7 @@ CachedImage* imageFor(const string& url, bool soft) {
     string key = soft ? "soft:" + url : url;
     CachedImage& entry = images[key];
     entry.used = nowMs();
-    if (!entry.bitmap && !entry.pixels && !entry.loading && !entry.failed) {
+    if (!entry.bitmap && entry.pixels.empty() && !entry.loading && !entry.failed) {
         entry.loading = true;
         // A budget of pixels rather than a count: past it, the covers not drawn for the
         // longest are forgotten (they come back from the network if they're needed again).
@@ -323,20 +330,28 @@ CachedImage* imageFor(const string& url, bool soft) {
                 CachedImage& old = images[byAge[i].second];
                 held -= std::min(held, old.bytes);
                 drop(old.bitmap);
-                drop(old.pixels);
+                std::vector<BYTE>().swap(old.pixels);
                 images.erase(byAge[i].second);
             }
         }
         string address = url;
-        async<string>([address] { HttpRes res = http("GET", address); return res.ok() ? res.body : string(); },
-            [key, soft](string bytes) { decode(key, bytes, soft); if (imageArrived) imageArrived(); });
+        async<Decoded>([address, soft] { HttpRes res = http("GET", address); return res.ok() ? decodeImage(res.body, soft) : Decoded(); },
+            [key](Decoded decoded) {
+                CachedImage& arrived = images[key];
+                arrived.loading = false;
+                arrived.failed = decoded.w == 0;
+                arrived.pixels = std::move(decoded.pixels);
+                arrived.pw = decoded.w;
+                arrived.ph = decoded.h;
+                if (decoded.hasColor) { arrived.color = decoded.color; arrived.hasColor = true; }
+                if (imageArrived) imageArrived();
+            });
     }
-    if (!entry.bitmap && entry.pixels && target) {
-        UINT pw = 0, ph = 0;
-        entry.pixels->GetSize(&pw, &ph);
-        entry.bytes = (size_t)pw * ph * 4;
-        rt->CreateBitmapFromWicBitmap(entry.pixels, nullptr, &entry.bitmap);
-        drop(entry.pixels);
+    if (!entry.bitmap && !entry.pixels.empty() && target) {
+        entry.bytes = entry.pixels.size();
+        rt->CreateBitmap(D2D1::SizeU(entry.pw, entry.ph), entry.pixels.data(), entry.pw * 4,
+                         D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &entry.bitmap);
+        std::vector<BYTE>().swap(entry.pixels);
     }
     return &entry;
 }
@@ -445,7 +460,7 @@ bool gfx::end() {
 void gfx::onImage(std::function<void()> fn) { imageArrived = std::move(fn); }
 
 void gfx::forgetImages() {
-    for (auto& kv : images) { drop(kv.second.bitmap); drop(kv.second.pixels); }
+    for (auto& kv : images) { drop(kv.second.bitmap); std::vector<BYTE>().swap(kv.second.pixels); }
     for (auto it = images.begin(); it != images.end();) it = it->second.loading ? std::next(it) : images.erase(it);
 }
 
@@ -456,7 +471,7 @@ void gfx::trimImages(long long keepMs) {
         if (entry.loading || now - entry.used <= keepMs) { ++it; continue; }
         // The color stays known (it's a few bytes); the pixels go.
         drop(entry.bitmap);
-        drop(entry.pixels);
+        std::vector<BYTE>().swap(entry.pixels);
         entry.bytes = 0;
         if (entry.hasColor) ++it;
         else it = images.erase(it);
@@ -568,30 +583,6 @@ void gfx::text(const string& s, Rect r, float size, int weight, Color c, int ali
     l->SetTextAlignment(align == AlignCenter ? DWRITE_TEXT_ALIGNMENT_CENTER : align == AlignRight ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING);
     l->SetParagraphAlignment(top ? DWRITE_PARAGRAPH_ALIGNMENT_NEAR : DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    l->Release();
-}
-
-void gfx::textSung(const string& s, Rect r, float size, int weight, Color dim, Color bright, int sungChars, int wordChars, float wordPart) {
-    if (s.empty() || r.w <= 0) return;
-    IDWriteTextLayout* l = layout(s, r.w, r.h, size, weight, true, 0);
-    if (!l) return;
-    l->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-    rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(dim));
-    // The sung part again in the bright color, clipped to where those letters are.
-    auto over = [&](int from, int count, float part) {
-        if (count <= 0 || part <= 0) return;
-        DWRITE_HIT_TEST_METRICS boxes[8];
-        UINT32 got = 0;
-        if (FAILED(l->HitTestTextRange((UINT32)from, (UINT32)count, r.x, r.y, boxes, 8, &got))) return;
-        for (UINT32 i = 0; i < got; i++) {
-            float w = boxes[i].width * (got == 1 ? part : (i + 1 < got ? 1.0f : part));
-            rt->PushAxisAlignedClip(D2D1::RectF(boxes[i].left, boxes[i].top - 2, boxes[i].left + w, boxes[i].top + boxes[i].height + 2), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(bright));
-            rt->PopAxisAlignedClip();
-        }
-    };
-    over(0, sungChars, 1);
-    over(sungChars, wordChars, wordPart);
     l->Release();
 }
 
@@ -768,7 +759,13 @@ void gfx::cached(const string& key, Rect r, const std::function<void()>& paintIt
     if (!cachedPicture || key != cachedKey) {
         drop(cachedPicture);
         ID2D1BitmapRenderTarget* offscreen = nullptr;
-        if (SUCCEEDED(rt->CreateCompatibleRenderTarget(D2D1::SizeF(r.w, r.h), &offscreen))) {
+        // A quarter of the size each way: it's all soft glows, and it's repainted every frame
+        // while one cover's colors blend into the next's.
+        float dpiX = 96, dpiY = 96;
+        rt->GetDpi(&dpiX, &dpiY);
+        D2D1_SIZE_F area = D2D1::SizeF(r.w, r.h);
+        D2D1_SIZE_U small_ = D2D1::SizeU(std::max(1u, (UINT)(r.w * dpiX / 96 / 4)), std::max(1u, (UINT)(r.h * dpiY / 96 / 4)));
+        if (SUCCEEDED(rt->CreateCompatibleRenderTarget(&area, &small_, nullptr, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, &offscreen))) {
             ID2D1RenderTarget* before = rt;
             rt = offscreen;
             rt->BeginDraw();

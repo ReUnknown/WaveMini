@@ -6,14 +6,14 @@
 #include "yt.h"
 #include <set>
 
-#define WAVEMINI_VERSION "0.8.0"
+#define WAVEMINI_VERSION "0.9.0"
 
 enum class Tab { None, UpNext, Lyrics, Search, Library, Account };
 
 struct LyricLine {
     double at = 0;       // seconds; only meaningful when the lyrics are synced
     string text;
-    float plainH = 0, sungH = 0;   // measured heights
+    float plainH = 0;    // measured height as plain reading text
     double end = 0;      // when the line is over (0 = not known)
     struct Word { double at, end; int from, count; };   // letters [from, from + count) of the text, in UTF-16
     std::vector<Word> words;
@@ -24,6 +24,7 @@ struct Settings {
     double volume = 1, rate = 1;
     bool saver = false;            // smallest audio instead of the best
     bool evenVolume = true, autoplay = true, onTop = true, startWithWindows = false;
+    bool followDesktops = true;    // comes along when you switch virtual desktops
     int corner = 3;                // 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right
     Tab tab = Tab::UpNext;
 };
@@ -97,6 +98,7 @@ struct App {
     std::vector<Page> libraryPages;
 
     float queueScroll = 0;
+    float accountScroll = 0;
 
     // The menu on any song (right-click, or its three dots).
     bool ctxOpen = false;
@@ -180,7 +182,12 @@ Size2 wantedSize();
 // (they differ while the window is changing shape).
 void draw(float w, float h, float shownW, float shownH);
 void uiFrame(float seconds);      // time since the last frame, for what's moving
-bool uiAnimating();               // something is still moving: draw again next frame
+bool uiAnimating();
+// The card's corner radius when its corners are to be rounded in the pixels afterwards
+// (0 while it's morphing and rounds itself).
+float uiCornerRadius();
+// The shadow under a card of this size.
+void uiShadow(float w, float h, float radius);               // something is still moving: draw again next frame
 void uiMouseDown(float x, float y);
 void uiMouseMove(float x, float y);
 void uiMouseUp(float x, float y);

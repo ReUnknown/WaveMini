@@ -376,7 +376,34 @@ void drawPlayer() {
     }
 
     bool liked = app.liked.count(song->id) > 0;
-    iconButton(Rect{left + 4, 98, 44, 44}, liked ? Icon::Liked : Icon::Like, 22, white(0), liked ? theme.accent : white(), 12, [] { toggleLike(); });
+    {
+        // Liking it: the thumb pops and a ring spreads out from it. Taking it back: a small dip.
+        static long long likedAt = 0;
+        static bool likedWas = false;
+        static string likedSong;
+        if (likedSong != song->id) { likedSong = song->id; likedWas = liked; likedAt = 0; }
+        if (liked != likedWas) { likedWas = liked; likedAt = nowMs(); }
+        Rect r{left + 4, 98, 44, 44};
+        bool over = click(r, [] { toggleLike(); });
+        if (over) gfx::fill(r, white(0.12f), 12);
+        float t = likedAt ? (nowMs() - likedAt) / 480.0f : 1;
+        float cx = r.x + 22, cy = r.y + 22, size = 1;
+        if (t < 1) {
+            animating = true;
+            float swing = sinf(t * 3.14159f) * (1 - t * 0.35f);
+            size = liked ? 1 + 0.5f * swing : 1 - 0.18f * swing;
+            if (liked) {
+                gfx::outline(Rect{cx - 12 - 16 * t, cy - 12 - 16 * t, 24 + 32 * t, 24 + 32 * t}, theme.accent.alpha(0.7f * (1 - t)), 12 + 16 * t, 2.5f * (1 - t) + 0.5f);
+                for (int i = 0; i < 6; i++) {
+                    float angle = i * 1.0472f + 0.5f, reach = 14 + 20 * t;
+                    gfx::circle(cx + cosf(angle) * reach, cy + sinf(angle) * reach, 2.2f * (1 - t), theme.accent.alpha(1 - t));
+                }
+            }
+        }
+        gfx::pushTransform(size, cx * (1 - size), cy * (1 - size));
+        gfx::icon(liked ? Icon::Liked : Icon::Like, Rect{cx - 11, cy - 11, 22, 22}, liked ? theme.accent : white());
+        gfx::popTransform();
+    }
     iconButton(Rect{250, 98, 44, 44}, Icon::Prev, 22, white(0), white(), 12, [] { previousSong(); });
     iconButton(Rect{362, 98, 44, 44}, Icon::Next, 22, white(0), white(), 12, [] { nextSong(true); });
     Rect main{298, 97, 60, 46};
@@ -1094,7 +1121,8 @@ void drawAccount() {
         pill(W_ - 20 - w, TOP + 12, 34, "Sign in", -1, true, 13, 14, 10, [] { startSignIn(); });
     }
 
-    float y = TOP + 66;
+    Rect list{0, TOP + 64, W_, PANEL - 64 - 46};
+    float y = beginScroll(list, app.accountScroll) + 2;
     gfx::text("Audio quality", Rect{16, y, 200, 40}, 14, Semi, white());
     float saverW = gfx::textWidth("Saver", 13, Bold) + 24, highW = gfx::textWidth("High", 13, Bold) + 24;
     chip(W_ - 16 - saverW, y + 5, "Saver", app.settings.saver, [] { app.settings.saver = true; saveState(); });
@@ -1106,7 +1134,11 @@ void drawAccount() {
     y += 42;
     toggle(y, "Stay on top of other windows", app.settings.onTop, [] { app.settings.onTop = !app.settings.onTop; applyOnTop(); saveState(); });
     y += 42;
+    toggle(y, "Follow me across virtual desktops", app.settings.followDesktops, [] { app.settings.followDesktops = !app.settings.followDesktops; saveState(); });
+    y += 42;
     toggle(y, "Start with Windows", app.settings.startWithWindows, [] { setStartWithWindows(!app.settings.startWithWindows); });
+    y += 44;
+    endScroll(list, app.accountScroll, y);
 
     float foot = TOP + PANEL - 44;
     gfx::text("WaveMini " WAVEMINI_VERSION, Rect{16, foot, 200, 36}, 12.5f, Regular, white(0.65f));
@@ -1356,6 +1388,9 @@ Size2 wantedSize() {
     return fullSize();
 }
 
+static float cornerRadius = 0;
+float uiCornerRadius() { return cornerRadius; }
+void uiShadow(float w, float h, float radius) { gfx::shadow(Rect{0, 3, w, h}, radius, 13, 0.3f); }
 void uiFrame(float seconds) { frameDt = seconds; }
 bool uiAnimating() { return animating; }
 
@@ -1445,8 +1480,12 @@ void draw(float w, float h, float shownW, float shownH) {
     float tuck = std::max(0.0f, std::min(1.0f, (full.w - shownW) / (full.w - 56)));
     float radius = 14 + (std::min(shownW, shownH) / 2 - 14) * tuck * tuck;
     Rect all{0, 0, shownW, shownH};
-    gfx::shadow(Rect{0, 3, shownW, shownH}, radius, 13, 0.3f);
-    gfx::pushClip(all, radius);
+    // At rest the card is drawn square and the window rounds its corners in the pixels
+    // afterwards: that spares a whole-window layer on every frame. Morphing, it rounds itself.
+    bool atRest = tuck < 0.004f;
+    cornerRadius = atRest ? 14.0f : 0.0f;
+    uiShadow(shownW, shownH, radius);
+    gfx::pushClip(all, atRest ? 0.0f : radius);
     if (tuck < 0.995f) {
         bool fading = tuck > 0.004f;
         if (fading) gfx::pushOpacity(all, 1 - tuck);

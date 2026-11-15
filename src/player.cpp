@@ -43,6 +43,7 @@ void loadState() {
         s.saver = state["saver"].truthy();
         s.evenVolume = !state["evenVolume"].has() || state["evenVolume"].truthy();
         s.autoplay = !state["autoplay"].has() || state["autoplay"].truthy();
+        s.followDesktops = !state["followDesktops"].has() || state["followDesktops"].truthy();
         s.onTop = !state["onTop"].has() || state["onTop"].truthy();
         s.startWithWindows = state["startWithWindows"].truthy();
         s.corner = std::max(0, std::min(3, (int)state["corner"].num(3)));
@@ -80,7 +81,7 @@ void saveState() {
     char numbers[96];
     sprintf(numbers, "\"volume\":%.3f,\"rate\":%.2f", s.volume, s.rate);
     string out = string("{") + numbers + ",\"saver\":" + flag(s.saver) + ",\"evenVolume\":" + flag(s.evenVolume) + ",\"autoplay\":" + flag(s.autoplay) +
-                 ",\"onTop\":" + flag(s.onTop) + ",\"startWithWindows\":" + flag(s.startWithWindows) + ",\"corner\":" + std::to_string(s.corner) +
+                 ",\"followDesktops\":" + flag(s.followDesktops) + ",\"onTop\":" + flag(s.onTop) + ",\"startWithWindows\":" + flag(s.startWithWindows) + ",\"corner\":" + std::to_string(s.corner) +
                  ",\"tab\":" + std::to_string((int)s.tab) + ",\"recent\":" + recent + (app.hasLast ? ",\"last\":" + itemJson(app.last) : "") + "}";
     writeFile(dataDir() + L"\\state.json", out);
 }
@@ -316,20 +317,36 @@ static void shuffleSongs(std::vector<Item>& songs, size_t from) {
     for (size_t i = songs.size(); i > from + 1; i--) std::swap(songs[i - 1], songs[from + rand() % (i - from)]);
 }
 
+// What a list turned out to hold, and where its queue carries on from.
+struct Opened { ListPage page; string continuation; };
+
 void playItem(const Item& item, bool shuffled) {
     if (item.kind == Kind::Song) { playRadio(item); return; }
     if (item.kind == Kind::Artist) return;
     showToast("Starting " + item.title);
     Item head = item;
-    async<ListPage>([head] {
-        if (head.kind == Kind::Album) return yt::album(head.id);
-        ListPage page = yt::playlist(head.id);
-        // Long playlists come in pages.
-        for (int more = 0; more < 4 && !page.continuation.empty(); more++)
-            for (auto& song : yt::playlistMore(page.continuation)) page.songs.push_back(song);
-        return page;
-    }, [head, shuffled](ListPage page) {
-        if (page.songs.empty()) { showToast("Couldn't open " + head.title); return; }
+    async<Opened>([head] {
+        Opened opened;
+        if (head.kind == Kind::Album) { opened.page = yt::album(head.id); return opened; }
+        // Radios and an artist's shuffle aren't pages to browse: they only exist as a queue.
+        bool queueOnly = startsWith(head.id, "RD");
+        if (!queueOnly) {
+            opened.page = yt::playlist(head.id);
+            // Long playlists come in pages.
+            for (int more = 0; more < 4 && !opened.page.continuation.empty(); more++)
+                for (auto& song : yt::playlistMore(opened.page.continuation)) opened.page.songs.push_back(song);
+        }
+        if (opened.page.songs.empty()) {
+            // Anything that wouldn't open as a page gets a second try as a queue.
+            NextResult queue = yt::next("", head.id);
+            if (queue.songs.empty()) queue = yt::next("", head.id);
+            opened.page.songs = queue.songs;
+            opened.continuation = queue.continuation;
+        }
+        return opened;
+    }, [head, shuffled](Opened opened) {
+        ListPage& page = opened.page;
+        if (page.songs.empty()) { showToast("Couldn't start " + head.title + ". Try again in a moment"); return; }
         if (shuffled) shuffleSongs(page.songs, 0);
         Item keep = head;
         if (keep.art.empty()) keep.art = page.head.art;
@@ -337,7 +354,7 @@ void playItem(const Item& item, bool shuffled) {
         if (keep.artists.empty()) keep.artists = page.head.artists;
         app.last = keep;
         app.hasLast = true;
-        playSongs(page.songs, 0, keep.title);
+        playSongs(page.songs, 0, keep.title, opened.continuation);
         app.shuffle = shuffled;
     });
 }
