@@ -53,8 +53,9 @@ void wave(Rect r, float progress, float phase, float amplitude, Color c);
 void text(const string& s, Rect r, float size, int weight, Color c, int align = AlignLeft, bool wrap = false, bool top = false, float spacing = 0);
 // A lyric line sung word by word: each word is [dim] until its turn, fills with [bright] from
 // the left ([part] 0..1, with a soft edge) and rises by [lift] as it does.
-struct SungWord { int from, count; float part; };   // letters in UTF-16
-void textWords(const string& s, Rect r, float size, int weight, Color dim, Color bright, const SungWord* words, int count, float lift);
+// [dy] moves the word up or down on its own; a [halo] with any opacity glows around sung words.
+struct SungWord { int from, count; float part; float dy; };   // letters in UTF-16
+void textWords(const string& s, Rect r, float size, int weight, Color dim, Color bright, const SungWord* words, int count, float lift, Color halo = Color{0, 0, 0, 0});
 float textWidth(const string& s, float size, int weight, float spacing = 0);
 float textHeight(const string& s, float width, float size, int weight);
 void icon(Icon which, Rect r, Color c);

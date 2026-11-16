@@ -86,6 +86,66 @@ void saveState() {
     writeFile(dataDir() + L"\\state.json", out);
 }
 
+// ---------------------------------------------------------------- Where you were
+
+static double seekWhenReady = 0;     // a restored song jumps here once it has loaded
+static string resumeSaved;           // what resume.json last held, so it's only rewritten when it changes
+
+static string pagesJson(const std::vector<Page>& stack) {
+    string out = "[";
+    size_t from = stack.size() > 4 ? stack.size() - 4 : 0;
+    for (size_t i = from; i < stack.size(); i++)
+        out += string(i > from ? "," : "") + "{\"type\":" + std::to_string((int)stack[i].type) + ",\"id\":" + jq(stack[i].id) + ",\"title\":" + jq(stack[i].title) + "}";
+    return out + "]";
+}
+
+void saveResume(bool closing) {
+    // The song and how far in: a few bytes, written often.
+    const Item* song = app.current();
+    double at = !song ? 0 : app.restored ? app.resumeAt : audio::position();
+    char place[64];
+    sprintf(place, "%.1f", at);
+    writeFile(dataDir() + L"\\resume.pos", song ? song->id + "\n" + place : "");
+    // The queue around it (not all of a thousand-song playlist) and what was open: a few
+    // kilobytes, written only when it changes.
+    int first = std::max(0, app.index - 5), last = std::min((int)app.queue.size(), app.index + 45);
+    string queue = "[";
+    for (int i = first; song && i < last; i++) queue += string(i > first ? "," : "") + itemJson(app.queue[i]);
+    queue += "]";
+    bool playing = closing && song && (app.playing || (app.loading && app.wantPlay));
+    string out = "{\"index\":" + std::to_string(song ? app.index - first : -1) + ",\"source\":" + jq(app.source) + ",\"continuation\":" + jq(last == (int)app.queue.size() ? app.continuation : "") +
+                 ",\"shuffle\":" + (app.shuffle ? "true" : "false") + ",\"repeat\":" + std::to_string(app.repeat) + ",\"playing\":" + (playing ? "true" : "false") +
+                 ",\"query\":" + jq(app.searched) + ",\"searchPages\":" + pagesJson(app.searchPages) + ",\"libraryPages\":" + pagesJson(app.libraryPages) + ",\"queue\":" + queue + "}";
+    if (out == resumeSaved) return;
+    resumeSaved = out;
+    writeFile(dataDir() + L"\\resume.json", out);
+}
+
+void loadResume(bool afterUpdate) {
+    resumeSaved = readFile(dataDir() + L"\\resume.json");
+    Json saved = Json::parse(resumeSaved);
+    if (!saved.has()) return;
+    for (auto& item : saved["queue"].each()) app.queue.push_back(itemFrom(item));
+    int index = (int)saved["index"].num(-1);
+    if (index >= 0 && index < (int)app.queue.size()) {
+        app.index = index;
+        app.source = saved["source"].str();
+        app.continuation = saved["continuation"].str();
+        app.shuffle = saved["shuffle"].truthy();
+        app.repeat = std::max(0, std::min(2, (int)saved["repeat"].num()));
+        app.restored = true;
+        std::vector<string> place = split(readFile(dataDir() + L"\\resume.pos"), "\n");
+        if (place.size() == 2 && place[0] == app.queue[index].id) app.resumeAt = std::max(0.0, atof(place[1].c_str()));
+    } else app.queue.clear();
+    // The pages that were open come back too (their contents are fetched again).
+    for (auto& page : saved["searchPages"].each()) openPage(app.searchPages, (Page::Type)(int)page["type"].num(), page["id"].str(), page["title"].str());
+    for (auto& page : saved["libraryPages"].each()) openPage(app.libraryPages, (Page::Type)(int)page["type"].num(), page["id"].str(), page["title"].str());
+    string query = saved["query"].str();
+    if (!query.empty()) { app.query = W(query); runSearch(); }
+    // An update that arrived in the middle of a song: carry straight on. Otherwise it waits, paused.
+    if (afterUpdate && app.restored && saved["playing"].truthy()) togglePlay();
+}
+
 static void saveLikes() {
     string out;
     for (auto& id : app.liked) out += id + "\n";
@@ -161,6 +221,8 @@ void signOut() {
     app.searchPages.clear();
     app.libraryPages.clear();
     app.menuOpen = false;
+    app.restored = false;
+    saveResume(false);       // nothing to come back to
     background([] { Sleep(1500); signin::forget(); });
     invalidate();
 }
@@ -268,6 +330,9 @@ void playIndex(int index, bool retryVerified) {
     app.needsVerification = false;
     app.queueScroll = 0;
     ++app.generation;
+    app.restored = false;
+    app.resumeAt = 0;
+    seekWhenReady = 0;
     waitingForNext = false;
     rejectedAudioClients = 0;
     activeAudioClient = AudioClient::None;
@@ -283,6 +348,7 @@ void playIndex(int index, bool retryVerified) {
     if (app.session.signedIn()) background([song] { yt::reportPlay(song.id); });
     if (app.settings.autoplay && (int)app.queue.size() - index <= 3) fetchMore();
     saveState();
+    saveResume(false);
     invalidate();
 }
 
@@ -365,6 +431,13 @@ void playLast(bool shuffled) {
 
 void togglePlay() {
     if (!app.current()) { playLast(false); return; }
+    if (app.restored) {
+        // The song from last time: load it now and pick up where it was.
+        double at = app.resumeAt;
+        playIndex(app.index);
+        seekWhenReady = at;
+        return;
+    }
     if (app.loading) { app.wantPlay = !app.wantPlay; return; }
     if (app.needsVerification) { verifyPlayback(); return; }
     if (!app.error.empty()) { playIndex(app.index); return; }
@@ -396,6 +469,7 @@ void previousSong() {
 }
 
 void seekTo(double seconds) {
+    if (app.restored && app.current()) { app.resumeAt = std::max(0.0, seconds); invalidate(); return; }
     if (!app.current() || app.loading) return;
     double length = audio::duration();
     audio::seek(std::max(0.0, length > 0 ? std::min(seconds, length - 0.5) : seconds));
@@ -525,6 +599,8 @@ void onAudio(AudioEvent event, LPARAM token) {
             app.loading = false;
             applyVolume();
             audio::setRate(app.settings.rate);
+            if (seekWhenReady > 1) audio::seek(seekWhenReady);
+            seekWhenReady = 0;
             if (app.wantPlay) audio::play();
             break;
         case AudioEvent::Playing: app.playing = true; break;
@@ -580,6 +656,8 @@ void tick() {
         invalidate();
     }
     if (app.suggestDue && now >= app.suggestDue) loadSuggestions();
+    static long long placeSaved = 0;
+    if (app.playing && now - placeSaved > 15000) { placeSaved = now; saveResume(false); }
     if (app.toastUntil && now >= app.toastUntil) { app.toastUntil = 0; app.toast.clear(); invalidate(); }
     // Continue only if a real end-of-track event requested another radio page.
     if (waitingForNext && app.current() && app.wantPlay && app.error.empty()) {
@@ -754,6 +832,24 @@ static LyricsResult parseLyrics(const Json& entry) {
     return out;
 }
 
+// The chorus: lines the song keeps coming back to (sung three times or more), or that sing
+// its title. They get their own animation.
+static void markHooks(std::vector<LyricLine>& lines, const string& songTitle) {
+    auto plain = [](const string& text) {
+        string out;
+        for (unsigned char c : lower(text)) if (isalnum(c) || c >= 0x80) out += (char)c; else if (c == ' ' && !out.empty() && out.back() != ' ') out += ' ';
+        return trim(out);
+    };
+    string title = plain(cleanTitle(songTitle));
+    std::map<string, int> seen;
+    std::vector<string> texts;
+    for (auto& line : lines) { texts.push_back(plain(line.text)); seen[texts.back()]++; }
+    for (size_t i = 0; i < lines.size(); i++) {
+        const string& t = texts[i];
+        lines[i].hook = !t.empty() && ((title.size() >= 3 && t.find(title) != string::npos) || (t.size() >= 8 && seen[t] >= 3));
+    }
+}
+
 // Lyrics timed line by line: each line's words are spread over the time it takes, by length,
 // so the singing still moves through the words.
 static void spreadWords(std::vector<LyricLine>& lines) {
@@ -830,7 +926,7 @@ void loadLyrics() {
         return result;
     }, [s](LyricsResult result) {
         if (app.lyricsFor != s.id) return;
-        if (result.synced) spreadWords(result.lines);
+        if (result.synced) { spreadWords(result.lines); markHooks(result.lines, s.title); }
         app.lyrics = std::move(result.lines);
         app.lyricsSynced = result.synced;
         app.lyricsLoading = false;

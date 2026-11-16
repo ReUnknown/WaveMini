@@ -360,6 +360,7 @@ void drawPlayer() {
         double length = audio::duration(), at = audio::position();
         if (length <= 0 && song->durationMs > 0) length = song->durationMs / 1000.0;
         if (app.loading) at = 0;
+        if (app.restored) at = app.resumeAt;      // from last time, waiting for play
         if (seekPreview >= 0) at = seekPreview * length;
         string a = formatTime(at), b = formatTime(length);
         float aw = gfx::textWidth(a, 12, Regular), bw = gfx::textWidth(b, 12, Regular);
@@ -368,7 +369,7 @@ void drawPlayer() {
         Rect bar{left + aw + 10, 66, W_ - 16 - bw - 10 - (left + aw + 10), 16};
         float phase = app.playing ? (float)(nowMs() % 100000) / 1000.0f * -3.2f : 0;
         gfx::wave(bar, length > 0 ? (float)(at / length) : 0, phase, glide(60, app.playing ? 2.4f : 0.0f), theme.accent);
-        if (length > 0 && !app.loading) dragArea(Rect{bar.x - 4, bar.y - 6, bar.w + 8, bar.h + 12}, [bar, length](float x, float, bool released) {
+        if (length > 0 && (!app.loading || app.restored)) dragArea(Rect{bar.x - 4, bar.y - 6, bar.w + 8, bar.h + 12}, [bar, length](float x, float, bool released) {
             double f = std::max(0.0f, std::min(1.0f, (x - bar.x) / bar.w));
             seekPreview = f;
             if (released) { seekPreview = -1; seekTo(f * length); }
@@ -607,19 +608,29 @@ void drawLyrics() {
         click(r, [seekAt] { app.lyricsNudgeUntil = 0; seekTo(seekAt); });
         int away = std::min(4, abs(i - std::max(now, 0)));
         float dim = 0.36f - 0.045f * away;
-        float scale = 0.95f + 0.05f * lit;
+        float scale = 0.95f + (line.hook ? 0.075f : 0.05f) * lit;
         gfx::pushTransform(scale, left * (1 - scale), (y + line.h / 2) * (1 - scale));
         if (!line.words.empty() && lit > 0.02f) {
             // The line being sung (and, for a moment, the one just finished): word by word.
+            // The chorus rides a wave: its words bob one after another, in the song's color,
+            // with a glow around them and a soft light behind the line.
+            bool chorus = line.hook;
+            float clock = (float)(nowMs() % 100000) / 1000.0f;
             std::vector<gfx::SungWord> sung;
             sung.reserve(line.words.size());
+            int k = 0;
             for (auto& word : line.words) {
                 double length = std::max(0.08, word.end - word.at);
                 float part = !current ? 1.0f : (float)std::max(0.0, std::min(1.0, (at - word.at) / length));
-                sung.push_back(gfx::SungWord{word.from, word.count, part});
+                float bob = chorus ? sinf(clock * 4.6f - k * 0.85f) * 2.6f * lit * (0.35f + 0.65f * part) : 0;
+                sung.push_back(gfx::SungWord{word.from, word.count, part, bob});
+                k++;
             }
             float dimmed = dim + (0.5f - dim) * lit;
-            gfx::textWords(line.text, r, size, Bold, white(dimmed), white(dimmed + (1 - dimmed) * lit), sung.data(), (int)sung.size(), 2.2f * lit);
+            if (chorus) {
+                gfx::glow(left + width * 0.42f, y + line.h / 2, width * 0.62f, line.h * 0.9f + 26, theme.accent.alpha(0.2f * lit));
+                gfx::textWords(line.text, r, size, Bold, white(dimmed), mix(white(), theme.soft, 0.75f).alpha(dimmed + (1 - dimmed) * lit), sung.data(), (int)sung.size(), 2.2f * lit, theme.accent.alpha(0.42f * lit));
+            } else gfx::textWords(line.text, r, size, Bold, white(dimmed), white(dimmed + (1 - dimmed) * lit), sung.data(), (int)sung.size(), 2.2f * lit);
         } else gfx::text(line.text, r, size, Bold, white(dim + (1 - dim) * lit), AlignLeft, true, true);
         gfx::popTransform();
     }

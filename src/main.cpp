@@ -122,11 +122,50 @@ static void followDesktop(HWND hwnd) {
     if (!manager || IsIconic(hwnd)) return;
     BOOL here = TRUE;
     if (FAILED(manager->IsWindowOnCurrentVirtualDesktop(hwnd, &here)) || here) return;
-    HWND front = GetForegroundWindow();
+    // Which desktop is this one? Any window that's on it can say. The one in front is tried
+    // first, then every other window (the desktop you came back to may have nothing in front
+    // but the taskbar, which belongs to no desktop: that's why it used to follow only once).
+    struct Search { IVirtualDesktopManager* manager; HWND self; bool moved; } search = {manager, hwnd, false};
+    auto tryWindow = [](Search& s, HWND candidate) {
+        if (s.moved || !candidate || candidate == s.self || !IsWindowVisible(candidate) || IsIconic(candidate)) return;
+        BOOL onThis = FALSE;
+        GUID desktop = {};
+        if (FAILED(s.manager->IsWindowOnCurrentVirtualDesktop(candidate, &onThis)) || !onThis) return;
+        if (FAILED(s.manager->GetWindowDesktopId(candidate, &desktop)) || desktop == GUID{}) return;
+        if (FAILED(s.manager->MoveWindowToDesktop(s.self, desktop))) return;
+        BOOL arrived = FALSE;
+        s.moved = SUCCEEDED(s.manager->IsWindowOnCurrentVirtualDesktop(s.self, &arrived)) && arrived;
+    };
+    tryWindow(search, GetForegroundWindow());
+    if (!search.moved) {
+        static void (*each)(Search&, HWND) = tryWindow;
+        EnumWindows([](HWND candidate, LPARAM param) -> BOOL {
+            Search& s = *(Search*)param;
+            each(s, candidate);
+            return !s.moved;
+        }, (LPARAM)&search);
+    }
+    if (search.moved) return;
+    // An empty desktop: a window made right now is born on it. A tiny see-through one, asked
+    // where it is, then removed.
+    static bool helperClass = false;
+    if (!helperClass) {
+        WNDCLASSW cls = {};
+        cls.lpfnWndProc = DefWindowProcW;
+        cls.hInstance = GetModuleHandleW(nullptr);
+        cls.lpszClassName = L"WaveMiniDesktopProbe";
+        helperClass = RegisterClassW(&cls) != 0;
+    }
+    HWND probe = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT, L"WaveMiniDesktopProbe", L"", WS_POPUP, -32000, -32000, 1, 1, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!probe) return;
+    SetLayeredWindowAttributes(probe, 0, 0, LWA_ALPHA);
+    ShowWindow(probe, SW_SHOWNOACTIVATE);
     GUID desktop = {};
-    if (!front || front == hwnd || FAILED(manager->GetWindowDesktopId(front, &desktop)) || desktop == GUID{}) return;
-    manager->MoveWindowToDesktop(hwnd, desktop);
+    for (int i = 0; i < 5 && (FAILED(manager->GetWindowDesktopId(probe, &desktop)) || desktop == GUID{}); i++) Sleep(15);
+    if (!(desktop == GUID{})) manager->MoveWindowToDesktop(hwnd, desktop);
+    DestroyWindow(probe);
 }
+
 
 // ---------------------------------------------------------------- Where the window sits
 
@@ -493,6 +532,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             return 0;
         case WM_CLOSE:
             saveState();
+            saveResume(true);
             signin::close();
             smtc::stop();
             audio::stop();
@@ -625,6 +665,7 @@ static int renderCheck(const wstring& dir) {
     {
         // The third line is being sung, part-way through its fifth word.
         LyricLine& sung = app.lyrics[2];
+        sung.hook = true;
         std::vector<string> words = split(sung.text, " ");
         int from = 0;
         for (size_t i = 0; i < words.size(); i++) {
@@ -815,6 +856,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     posX = (float)cursor.x;
     posY = (float)cursor.y;
     if (app.session.signedIn()) signedIn(app.session);
+    if (app.hasSession) loadResume(afterUpdate);
     if (app.settings.tab == Tab::Library) loadLibrary(app.libraryTab);
     render();
     ShowWindow(window, SW_SHOWNOACTIVATE);

@@ -586,7 +586,7 @@ void gfx::text(const string& s, Rect r, float size, int weight, Color c, int ali
     l->Release();
 }
 
-void gfx::textWords(const string& s, Rect r, float size, int weight, Color dim, Color bright, const SungWord* words, int count, float lift) {
+void gfx::textWords(const string& s, Rect r, float size, int weight, Color dim, Color bright, const SungWord* words, int count, float lift, Color halo) {
     if (s.empty() || r.w <= 0) return;
     IDWriteTextLayout* l = layout(s, r.w, r.h, size, weight, true, 0);
     if (!l) return;
@@ -602,11 +602,16 @@ void gfx::textWords(const string& s, Rect r, float size, int weight, Color dim, 
         float part = std::max(0.0f, std::min(1.0f, word.part));
         // A word rises a little as it's sung, and stays up until the line is done.
         float eased = part * part * (3 - 2 * part);
-        rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -lift * eased) * before);
+        rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -lift * eased + word.dy) * before);
         for (UINT32 b = 0; b < got; b++) {
-            D2D1_RECT_F box = D2D1::RectF(boxes[b].left - 1, boxes[b].top - 3, boxes[b].left + boxes[b].width + 1, boxes[b].top + boxes[b].height + 3);
+            D2D1_RECT_F box = D2D1::RectF(boxes[b].left - 3, boxes[b].top - 4, boxes[b].left + boxes[b].width + 3, boxes[b].top + boxes[b].height + 4);
             rt->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(dim));
+            if (halo.a > 0 && part > 0) {
+                // A glow: the word again, faint, a little off in each direction.
+                static const float around[4][2] = {{-1.8f, -1.2f}, {1.8f, -1.2f}, {-1.8f, 1.4f}, {1.8f, 1.4f}};
+                for (auto& off : around) rt->DrawTextLayout(D2D1::Point2F(r.x + off[0], r.y + off[1]), l, paint(Color{halo.r, halo.g, halo.b, halo.a * part}));
+            }
             if (part >= 1) rt->DrawTextLayout(D2D1::Point2F(r.x, r.y), l, paint(bright));
             else if (part > 0) {
                 // The bright color sweeps across with a soft leading edge, not a hard line.

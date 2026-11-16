@@ -6,7 +6,7 @@
 #include "yt.h"
 #include <set>
 
-#define WAVEMINI_VERSION "0.9.0"
+#define WAVEMINI_VERSION "0.9.1"
 
 enum class Tab { None, UpNext, Lyrics, Search, Library, Account };
 
@@ -18,6 +18,7 @@ struct LyricLine {
     struct Word { double at, end; int from, count; };   // letters [from, from + count) of the text, in UTF-16
     std::vector<Word> words;
     float h = 0;         // measured height
+    bool hook = false;   // part of the chorus: a line the song keeps coming back to
 };
 
 struct Settings {
@@ -55,6 +56,10 @@ struct App {
     int generation = 0;            // bumps with every song opened; stale answers are dropped
     bool fetchingMore = false;
     double loudnessGain = 1;
+    // Brought back from last time: the song is shown paused where it was, and only loaded
+    // when you press play.
+    bool restored = false;
+    double resumeAt = 0;           // seconds into the song
     Item last;                     // the last thing played, for the empty player
     bool hasLast = false;
     std::set<string> liked;
@@ -135,6 +140,10 @@ extern App app;
 void loadState();
 void saveState();
 void saveSession();
+// Where you were (the queue, the song and how far in, open pages), kept small on disk.
+// [closing]: also notes whether a song was playing, for coming back after an update.
+void saveResume(bool closing);
+void loadResume(bool afterUpdate);
 void signedIn(const Session& s);   // a new session (or a guest): saves it and loads its data
 void signOut();
 
